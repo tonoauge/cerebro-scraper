@@ -1,0 +1,46 @@
+name: Scraper PE (Menor Preço PR)
+
+on:
+  workflow_dispatch:
+    inputs:
+      grupo_inicio:
+        description: 'Grupo início (deixe vazio para modo manual ativo=true)'
+        required: false
+        type: string
+      grupo_fim:
+        description: 'Grupo fim'
+        required: false
+        type: string
+      cron_config_id:
+        description: 'ID do cron_config (apenas para rastreio)'
+        required: false
+        type: string
+
+jobs:
+  scraper:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: scraper/requirements.txt
+
+      - name: Instalar dependências
+        run: pip install -r scraper/requirements.txt
+
+      - name: Executar scraper PE
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          CI:                   'true'
+          GRUPO_INICIO:         ${{ github.event.inputs.grupo_inicio }}
+          GRUPO_FIM:            ${{ github.event.inputs.grupo_fim }}
+          CRON_CONFIG_ID:       ${{ github.event.inputs.cron_config_id }}
+        run: python scraper/scraperPE.py

@@ -1,0 +1,84 @@
+name: Scraper Cron Roteador — Frutas PE (agenda)
+
+# Roteador dedicado da fonte cfru-pe, dirigido pela tabela cerebro.cron_agenda
+# (horário + dias da semana + N execuções/dia). Separado do scraper-cron.yml para
+# ter janela maior (até 23:00 UTC = 20h BRT) e disparar várias vezes ao dia.
+#
+# Roda TODOS OS DIAS, só em volta dos 3 slots (10/17/23 UTC = 07/14/20h BRT), com 1
+# retry de 30 min cada → 6 ticks/dia. O endpoint /api/cron/verificar-agenda decide o
+# que está "vencido" (catch-up), então um tick atrasado ainda dispara o slot do dia.
+
+on:
+  schedule:
+    - cron: '0,30 10,17,23 * * *'
+  workflow_dispatch:
+
+jobs:
+  rotear:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Buscar slots vencidos da agenda
+        id: buscar
+        env:
+          API_URL:    ${{ secrets.AGRODADOS_URL }}
+          API_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          # Captura status HTTP + corpo (sem -f) para diagnosticar 401 vs 500 vs 200.
+          HTTP=$(curl -s -o /tmp/grupos.json -w "%{http_code}" \
+            -H "Authorization: Bearer $API_SECRET" \
+            "$API_URL/api/cron/verificar-agenda")
+          echo "HTTP status: $HTTP"
+          echo "Body: $(cat /tmp/grupos.json)"
+
+          if [ "$HTTP" != "200" ]; then
+            echo "❌ verificar-agenda retornou HTTP $HTTP"
+            exit 1
+          fi
+
+          TOTAL=$(jq -r '.total // 0' /tmp/grupos.json)
+          echo "Lotes a disparar: $TOTAL"
+          echo "total=$TOTAL" >> $GITHUB_OUTPUT
+
+      - name: Disparar scraper de frutas PE
+        if: steps.buscar.outputs.total != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          TOTAL=$(jq -r '.total' /tmp/grupos.json)
+          echo "Disparando $TOTAL lote(s) de cfru-pe..."
+
+          DISPARADOS=0
+          FALHAS=0
+
+          for i in $(seq 0 $(($TOTAL - 1))); do
+            INICIO=$(jq -r ".grupos[$i].grupo_inicio" /tmp/grupos.json)
+            FIM=$(jq -r ".grupos[$i].grupo_fim" /tmp/grupos.json)
+            CONFIG_ID=$(jq -r ".grupos[$i].id" /tmp/grupos.json)
+
+            gh workflow run scraperFrutasPE.yml \
+              --repo ${{ github.repository }} \
+              --ref main \
+              -f grupo_inicio="$INICIO" \
+              -f grupo_fim="$FIM" \
+              -f cron_config_id="$CONFIG_ID" \
+              && { DISPARADOS=$((DISPARADOS + 1)); echo "✓ FRUTAS-PE [$INICIO:$FIM] despachado"; } \
+              || { FALHAS=$((FALHAS + 1)); echo "⚠ FALHA ao despachar FRUTAS-PE [$INICIO:$FIM]"; }
+
+            # Pequena pausa para não estourar rate limit da API de workflows do GitHub
+            sleep 2
+          done
+
+          echo ""
+          echo "━━━ Resumo ━━━"
+          echo "Disparados: $DISPARADOS · Falhas: $FALHAS"
+
+          if [ "$FALHAS" -gt 0 ]; then
+            echo "⚠ $FALHAS despacho(s) falharam — verifique as permissões do GH_PAT (scope 'workflow')"
+            exit 1
+          fi
+
+      - name: Nada vencido
+        if: steps.buscar.outputs.total == '0'
+        run: echo "Nenhum slot da agenda vencido neste tick — nada a fazer."

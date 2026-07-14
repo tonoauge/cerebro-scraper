@@ -1,0 +1,2 @@
+# Runner Linux: força LF (os workflows têm scripts bash embutidos que quebram com CRLF)
+* text=auto eol=lf

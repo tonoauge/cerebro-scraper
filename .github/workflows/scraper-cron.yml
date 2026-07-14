@@ -1,0 +1,112 @@
+name: Scraper Cron Roteador
+
+on:
+  schedule:
+    # Todo dia, só 3 ticks (06/07/08 UTC): 1 disparo no 1º tick + 2 de retry.
+    # Roda diário por causa do cfru-ba; BA/PE são filtrados p/ ter-sex no verificar-grupo.
+    - cron: '0 6-8 * * *'
+  workflow_dispatch:
+
+jobs:
+  rotear:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Buscar grupos pendentes do dia
+        id: buscar
+        env:
+          API_URL:    ${{ secrets.AGRODADOS_URL }}
+          API_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          RESPONSE=$(curl -sf -H "Authorization: Bearer $API_SECRET" \
+            "$API_URL/api/cron/verificar-grupo") || {
+            echo "❌ Falha ao chamar verificar-grupo (curl retornou erro)"
+            exit 1
+          }
+
+          echo "Resposta: $RESPONSE"
+
+          TOTAL=$(echo "$RESPONSE" | jq -r '.total // 0')
+          echo "Grupos pendentes: $TOTAL"
+          echo "total=$TOTAL" >> $GITHUB_OUTPUT
+          echo "$RESPONSE" > /tmp/grupos.json
+
+      - name: Disparar todos os scrapers pendentes
+        if: steps.buscar.outputs.total != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          TOTAL=$(jq -r '.total' /tmp/grupos.json)
+          echo "Disparando $TOTAL grupo(s)..."
+          echo ""
+          echo "Cada 'gh workflow run' cria um runner separado = IP diferente."
+          echo ""
+
+          DISPARADOS_BA=0
+          DISPARADOS_PE=0
+          FALHAS=0
+
+          for i in $(seq 0 $(($TOTAL - 1))); do
+            FONTE=$(jq -r ".grupos[$i].fonte" /tmp/grupos.json)
+            INICIO=$(jq -r ".grupos[$i].grupo_inicio" /tmp/grupos.json)
+            FIM=$(jq -r ".grupos[$i].grupo_fim" /tmp/grupos.json)
+            CONFIG_ID=$(jq -r ".grupos[$i].id" /tmp/grupos.json)
+
+            if [ "$FONTE" = "BA" ]; then
+              gh workflow run scraper.yml \
+                --repo ${{ github.repository }} \
+                --ref main \
+                -f grupo_inicio="$INICIO" \
+                -f grupo_fim="$FIM" \
+                -f cron_config_id="$CONFIG_ID" \
+                && { DISPARADOS_BA=$((DISPARADOS_BA + 1)); echo "✓ BA [$INICIO:$FIM] despachado"; } \
+                || { FALHAS=$((FALHAS + 1)); echo "⚠ FALHA ao despachar BA [$INICIO:$FIM]"; }
+
+            elif [ "$FONTE" = "PE" ]; then
+              gh workflow run scraperPE.yml \
+                --repo ${{ github.repository }} \
+                --ref main \
+                -f grupo_inicio="$INICIO" \
+                -f grupo_fim="$FIM" \
+                -f cron_config_id="$CONFIG_ID" \
+                && { DISPARADOS_PE=$((DISPARADOS_PE + 1)); echo "✓ PE [$INICIO:$FIM] despachado"; } \
+                || { FALHAS=$((FALHAS + 1)); echo "⚠ FALHA ao despachar PE [$INICIO:$FIM]"; }
+
+            elif [ "$FONTE" = "cfru-ba" ]; then
+              gh workflow run scraperFrutasBA.yml \
+                --repo ${{ github.repository }} \
+                --ref main \
+                -f grupo_inicio="$INICIO" \
+                -f grupo_fim="$FIM" \
+                -f cron_config_id="$CONFIG_ID" \
+                && { DISPARADOS_BA=$((DISPARADOS_BA + 1)); echo "✓ FRUTAS-BA [$INICIO:$FIM] despachado"; } \
+                || { FALHAS=$((FALHAS + 1)); echo "⚠ FALHA ao despachar FRUTAS-BA [$INICIO:$FIM]"; }
+
+            elif [ "$FONTE" = "cfru-pe" ]; then
+              gh workflow run scraperFrutasPE.yml \
+                --repo ${{ github.repository }} \
+                --ref main \
+                -f grupo_inicio="$INICIO" \
+                -f grupo_fim="$FIM" \
+                -f cron_config_id="$CONFIG_ID" \
+                && { DISPARADOS_PE=$((DISPARADOS_PE + 1)); echo "✓ FRUTAS-PE [$INICIO:$FIM] despachado"; } \
+                || { FALHAS=$((FALHAS + 1)); echo "⚠ FALHA ao despachar FRUTAS-PE [$INICIO:$FIM]"; }
+            fi
+
+            # Pequena pausa para não estourar rate limit da API de workflows do GitHub
+            sleep 2
+          done
+
+          echo ""
+          echo "━━━ Resumo ━━━"
+          echo "BA: $DISPARADOS_BA · PE: $DISPARADOS_PE · Falhas: $FALHAS · Total: $((DISPARADOS_BA + DISPARADOS_PE))"
+
+          if [ "$FALHAS" -gt 0 ]; then
+            echo "⚠ $FALHAS despacho(s) falharam — verifique as permissões do GH_PAT (precisa do scope 'workflow')"
+            exit 1
+          fi
+
+      - name: Sem grupo pendente
+        if: steps.buscar.outputs.total == '0'
+        run: echo "Todos os grupos já rodaram hoje — nada a fazer."
