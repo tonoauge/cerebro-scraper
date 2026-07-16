@@ -462,19 +462,33 @@ def registrar_lojas_novas(sb: Client, registros: list[dict], lojas_existentes: s
 
 # ── Execução principal ────────────────────────────────────────
 
+def _com_retry(fn, tentativas=3, espera=15, descricao=""):
+    """Repete fn() algumas vezes, absorvendo erros transitorios de rede
+    (timeout do site-fonte, conexao HTTP/2 do Supabase encerrada, etc.)."""
+    for tentativa in range(1, tentativas + 1):
+        try:
+            return fn()
+        except Exception as exc:
+            if tentativa >= tentativas:
+                raise
+            log.warning("Tentativa %d/%d falhou em '%s' (%s) - aguardando %ds e repetindo",
+                        tentativa, tentativas, descricao, exc, espera)
+            time.sleep(espera)
+
+
 def main() -> None:
     log.info("=== Monitor de Insumos Agrícolas (BA) — iniciando ===")
 
     sb               = conectar_supabase()
-    produtos         = carregar_produtos(sb)
-    lojas_existentes = carregar_lojas_existentes(sb)
+    produtos         = _com_retry(lambda: carregar_produtos(sb), descricao="carregar_produtos")
+    lojas_existentes = _com_retry(lambda: carregar_lojas_existentes(sb), descricao="carregar_lojas_existentes")
 
     if not produtos:
         log.warning("Nenhum produto para coletar nesse grupo/filtro.")
         atualizar_cron_config(sb, "sucesso", 0)
         sys.exit(0)
 
-    session     = criar_sessao()
+    session     = _com_retry(criar_sessao, descricao="criar_sessao")
     coleta_id   = abrir_coleta(sb)
     total_geral = 0
     erros       = []
@@ -526,4 +540,12 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        log.exception("Falha fatal na execucao - marcando cron_config como 'falha'")
+        try:
+            atualizar_cron_config(conectar_supabase(), "falha", 0)
+        except Exception:
+            pass
+        sys.exit(1)

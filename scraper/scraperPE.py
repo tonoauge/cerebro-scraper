@@ -415,13 +415,27 @@ def inserir_precos(
 
 # ── Main ──────────────────────────────────────────────────────
 
+def _com_retry(fn, tentativas=3, espera=15, descricao=""):
+    """Repete fn() algumas vezes, absorvendo erros transitorios de rede
+    (timeout do site-fonte, conexao HTTP/2 do Supabase encerrada, etc.)."""
+    for tentativa in range(1, tentativas + 1):
+        try:
+            return fn()
+        except Exception as exc:
+            if tentativa >= tentativas:
+                raise
+            log.warning("Tentativa %d/%d falhou em '%s' (%s) - aguardando %ds e repetindo",
+                        tentativa, tentativas, descricao, exc, espera)
+            time.sleep(espera)
+
+
 def main() -> None:
     log.info("=== Monitor Menor Preço PR — iniciando ===")
     log.info("    Local: %s | Raio: %dkm | Período: %dd", LOCAL, RAIO, DATA_DIAS)
 
     sb           = conectar_supabase()
-    produtos     = carregar_produtos(sb)
-    existentes   = carregar_estabelecimentos_existentes(sb)
+    produtos     = _com_retry(lambda: carregar_produtos(sb), descricao="carregar_produtos")
+    existentes   = _com_retry(lambda: carregar_estabelecimentos_existentes(sb), descricao="carregar_estabelecimentos")
 
     if not produtos:
         log.warning("Nenhum produto para coletar nesse grupo/filtro.")
@@ -469,4 +483,12 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        log.exception("Falha fatal na execucao - marcando cron_config como 'falha'")
+        try:
+            atualizar_cron_config(conectar_supabase(), "falha", 0)
+        except Exception:
+            pass
+        sys.exit(1)

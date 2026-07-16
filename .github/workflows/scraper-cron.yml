@@ -3,7 +3,8 @@ name: Scraper Cron Roteador
 on:
   schedule:
     # Todo dia, só 3 ticks (06/07/08 UTC): 1 disparo no 1º tick + 2 de retry.
-    # Roda diário por causa do cfru-ba; BA/PE são filtrados p/ ter-sex no verificar-grupo.
+    # Todas as fontes rodam TODOS os dias (repo público = minutos ilimitados);
+    # quem decide os lotes a disparar é o /api/cron/verificar-grupo.
     - cron: '0 6-8 * * *'
   workflow_dispatch:
 
