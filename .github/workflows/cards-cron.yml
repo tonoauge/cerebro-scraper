@@ -1,0 +1,14 @@
+name: Cards de Noticias
+on:
+  schedule:
+    - cron: '0 9 * * *'   # 06h BRT — gera os cards de noticias do dia
+  workflow_dispatch:
+jobs:
+  gerar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Gerar cards das fontes (RSS + Gemini)
+        run: |
+          # O endpoint decide, por fonte, se hoje e dia de coleta (dias_semana).
+          curl -fsS -X GET "${{ secrets.AGRODADOS_URL }}/api/gerar-cards" \
+            -H "x-api-secret: ${{ secrets.API_SECRET }}"
