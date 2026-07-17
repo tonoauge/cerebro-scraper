@@ -1,0 +1,33 @@
+name: Cron AgroDados
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+jobs:
+  clima-e-cambio:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Coleta clima
+        run: |
+          curl -X GET "${{ secrets.AGRODADOS_URL }}/api/cron/clima" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
+      - name: Coleta cambio
+        run: |
+          curl -X GET "${{ secrets.AGRODADOS_URL }}/api/cron/cambio" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
+  analise:
+    runs-on: ubuntu-latest
+    needs: clima-e-cambio
+    steps:
+      - name: Gera analise IA
+        run: |
+          curl -X GET "${{ secrets.AGRODADOS_URL }}/api/cron/analise" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
+  culturas:
+    runs-on: ubuntu-latest
+    needs: clima-e-cambio
+    steps:
+      - name: Coleta cotacoes e analises de culturas
+        run: |
+          curl -X GET "${{ secrets.AGRODADOS_URL }}/api/cron/culturas" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
