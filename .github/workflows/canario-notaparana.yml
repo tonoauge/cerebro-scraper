@@ -1,0 +1,76 @@
+# Canário Nota Paraná
+#
+# Faz UMA ÚNICA requisição à API do Nota Paraná para responder uma pergunta:
+# o envenenamento iniciado em 23/07 é por FAIXA DE IP do GitHub Actions ou foi
+# disparado por VOLUME?
+#
+#   local ecoado (== o geohash que enviamos) → regra por faixa de IP.
+#     É persistente; reduzir cadência não recupera nada.
+#   local com 11 caracteres e loja real      → gatilho por volume/comportamento.
+#     Reduzir cadência tem chance real de recuperar a coleta.
+#
+# Uma requisição não gera carga. Não grava nada no banco.
+# Ver docs/scraping-precos.md §10 no repo cerebro-agro.
+
+name: Canário Nota Paraná
+
+on:
+  workflow_dispatch:
+
+jobs:
+  canario:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Uma requisição e veredito
+        run: |
+          python - <<'PY'
+          import json, sys, urllib.parse, urllib.request
+
+          LOCAL = "7n75qzfef"   # ponto 1 do scraper de frutas
+          params = {"termo": "Uva", "local": LOCAL, "raio": 20, "data": 5, "ordem": 1}
+          url = "https://menorpreco.notaparana.pr.gov.br/api/v1/produtos?" + urllib.parse.urlencode(params)
+
+          req = urllib.request.Request(url)
+          req.add_header("User-Agent", "Dalvik/2.1.0 (Linux; U; Android 16; 2412DPC0AG Build/BP2A.250605.031.A3)")
+          req.add_header("Accept-Charset", "UTF-8")
+          req.add_header("Content-Type", "application/json")
+
+          with urllib.request.urlopen(req, timeout=30) as r:
+              dados = json.loads(r.read().decode())
+
+          itens = dados.get("produtos") or []
+          print(f"HTTP 200 | total={dados.get('total')} | itens={len(itens)}")
+          print(f"geohash enviado na consulta: {LOCAL}\n")
+
+          for it in itens[:5]:
+              est = it.get("estabelecimento", {})
+              print(f"  R${it.get('valor')} | {str(it.get('desc'))[:34]:<34} "
+                    f"| {str(est.get('nm_fan'))[:26]:<26} | {est.get('mun')}/{est.get('uf')} "
+                    f"| dist={it.get('distkm')} | local={it.get('local')}")
+
+          if not itens:
+              print("\nINCONCLUSIVO: a API não devolveu itens.")
+              sys.exit(0)
+
+          ecoados = sum(1 for it in itens if (it.get("local") or "") == LOCAL)
+          print(f"\nitens que ecoam o geohash da consulta: {ecoados}/{len(itens)}")
+
+          if ecoados / len(itens) >= 0.5:
+              print("\nVEREDITO: ENVENENADO a partir do IP do GitHub Actions.")
+              print("  → o corte é por FAIXA DE IP, é persistente, e reduzir")
+              print("    cadência NÃO recupera a coleta. Só trocar de origem resolve.")
+          else:
+              print("\nVEREDITO: resposta LIMPA a partir do IP do GitHub Actions.")
+              print("  → o gatilho foi VOLUME/COMPORTAMENTO, não a faixa de IP.")
+              print("    Reduzir cadência tem chance real de manter a coleta sadia.")
+          PY

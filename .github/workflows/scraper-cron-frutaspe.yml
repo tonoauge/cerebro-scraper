@@ -4,13 +4,18 @@ name: Scraper Cron Roteador — Frutas PE (agenda)
 # (horário + dias da semana + N execuções/dia). Separado do scraper-cron.yml para
 # ter janela maior (até 23:00 UTC = 20h BRT) e disparar várias vezes ao dia.
 #
-# Roda TODOS OS DIAS, só em volta dos 3 slots (10/17/23 UTC = 07/14/20h BRT), com 1
-# retry de 30 min cada → 6 ticks/dia. O endpoint /api/cron/verificar-agenda decide o
-# que está "vencido" (catch-up), então um tick atrasado ainda dispara o slot do dia.
+# Desde 2026-08-04: 1 slot só (10 UTC = 07h BRT) e apenas Ter/Qui/Sáb — os dias
+# ficam em cerebro.cron_agenda.dias_semana, aqui só se reduz a janela de ticks.
+# Motivo: a API do Nota Paraná passou a envenenar as respostas vindas dos IPs do
+# GitHub Actions em 23/07; reduzir a pegada. Ver docs/scraping-precos.md §10.
+# Antes: '0,30 10,17,23 * * *' (3 slots, todo dia, 6 ticks/dia).
+#
+# Com 1 retry de 30 min → 2 ticks/dia. O endpoint /api/cron/verificar-agenda decide
+# o que está "vencido" (catch-up), então um tick atrasado ainda dispara o slot do dia.
 
 on:
   schedule:
-    - cron: '0,30 10,17,23 * * *'
+    - cron: '0,30 10 * * *'
   workflow_dispatch:
 
 jobs:

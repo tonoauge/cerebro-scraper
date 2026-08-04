@@ -92,6 +92,34 @@ HEADERS = {
 # ── Cache local de categorias PR (evita chamadas repetidas no mesmo run) ──
 _cache_categorias: dict[str, int | None] = {}
 
+
+# ── Detecção de resposta envenenada ───────────────────────────────────────
+# Desde 2026-07-23 a API devolve dados FABRICADOS (municípios e lojas com letras
+# trocadas, UFs sorteadas em terços, preços aleatórios) para as chamadas vindas
+# dos IPs do GitHub Actions. Do mesmo endpoint, com os mesmos parâmetros, um IP
+# residencial recebe dado real — o corte é por IP.
+#
+# Assinatura infalível: no dado real, `local` é o geohash do ESTABELECIMENTO,
+# distinto a cada loja. No dado fabricado, a API ecoa de volta o geohash que
+# ENVIAMOS na consulta (LOCAL). Igualdade entre os dois não acontece por acaso.
+
+class RespostaEnvenenada(Exception):
+    """A API devolveu dados sintéticos — abortar sem gravar nada."""
+
+
+def detectar_envenenamento(itens: list[dict], local: str) -> None:
+    """Levanta RespostaEnvenenada se a maioria dos itens ecoar o geohash consultado.
+
+    O limiar de metade evita que uma coincidência isolada derrube um run legítimo.
+    """
+    if not itens:
+        return
+    ecoados = sum(1 for it in itens if (it.get("local") or "") == local)
+    if ecoados / len(itens) >= 0.5:
+        raise RespostaEnvenenada(
+            f"local='{local}' ecoado em {ecoados}/{len(itens)} itens"
+        )
+
 # ── Extração de quantidade da embalagem ──────────────────────
 
 def extrair_quantidade(desc: str) -> tuple[float | None, str | None]:
@@ -208,6 +236,8 @@ def buscar_precos_pr(
     pmin  = dados.get("precos", {}).get("min")
     pmax  = dados.get("precos", {}).get("max")
     log.info("  → %d resultados | min R$%s | max R$%s", total, pmin, pmax)
+
+    detectar_envenenamento(itens, LOCAL)
 
     resultados = []
     for item in itens[:MAX_RESULTADOS]:
@@ -447,31 +477,48 @@ def main() -> None:
     total_geral = 0
     erros       = []
 
-    for produto in produtos:
-        produto_id = produto["id"]
-        termo      = produto["busca"]
-        nome       = produto["nome"]
+    envenenado = None
 
-        log.info("Buscando | id=%d nome='%s' termo='%s'", produto_id, nome, termo)
+    try:
+        for produto in produtos:
+            produto_id = produto["id"]
+            termo      = produto["busca"]
+            nome       = produto["nome"]
 
-        try:
-            registros = buscar_precos_pr(session, produto)
+            log.info("Buscando | id=%d nome='%s' termo='%s'", produto_id, nome, termo)
 
-            if registros:
-                existentes = registrar_estabelecimentos_novos(sb, registros, existentes)
+            try:
+                registros = buscar_precos_pr(session, produto)
 
-            inseridos = inserir_precos(sb, coleta_id, produto_id, registros)
-            total_geral += inseridos
-            log.info("  → %d encontrados | %d inseridos", len(registros), inseridos)
+                if registros:
+                    existentes = registrar_estabelecimentos_novos(sb, registros, existentes)
 
-        except Exception as exc:
-            msg = f"produto_id={produto_id} nome={nome}: {exc}"
-            log.error("ERRO | %s", msg)
-            erros.append(msg)
+                inseridos = inserir_precos(sb, coleta_id, produto_id, registros)
+                total_geral += inseridos
+                log.info("  → %d encontrados | %d inseridos", len(registros), inseridos)
 
-        time.sleep(SLEEP_REQUESTS)
+            # Antes do handler genérico: envenenamento não é erro de um produto,
+            # é a fonte inteira comprometida — não adianta seguir para o próximo.
+            except RespostaEnvenenada:
+                raise
+            except Exception as exc:
+                msg = f"produto_id={produto_id} nome={nome}: {exc}"
+                log.error("ERRO | %s", msg)
+                erros.append(msg)
+
+            time.sleep(SLEEP_REQUESTS)
+
+    except RespostaEnvenenada as exc:
+        envenenado = str(exc)
+        log.error("=== ABORTADO — API devolveu dados sintéticos | %s ===", envenenado)
+        log.error("    Nada foi gravado nesta execução. Ver docs/scraping-precos.md §10.")
+        erros.append(f"resposta envenenada: {envenenado}")
 
     fechar_coleta(sb, coleta_id, total_geral, erros)
+
+    if envenenado:
+        atualizar_cron_config(sb, "falha", total_geral)
+        sys.exit(1)
 
     status_final = "sucesso" if not erros else ("erro_parcial" if total_geral > 0 else "falha")
     atualizar_cron_config(sb, status_final, total_geral)
