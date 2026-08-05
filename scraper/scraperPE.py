@@ -75,7 +75,7 @@ RAIO           = 20              # km
 DATA_DIAS      = 3               # dias retroativos
 ORDEM          = 2               # 2 = mais recente primeiro
 MAX_RESULTADOS = 200             # máx por produto (API não tem paginação)
-SLEEP_REQUESTS = 15              # pausa entre produtos (segundos)
+SLEEP_REQUESTS = 30              # pausa entre produtos (segundos) — 15s ate 04/08/2026
 SLEEP_429      = 60              # pausa em caso de rate limit
 MAX_RETRIES    = 3
 
