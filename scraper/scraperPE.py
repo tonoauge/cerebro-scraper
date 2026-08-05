@@ -27,13 +27,21 @@ import sys
 import json
 import time
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import requests
 from supabase import create_client, Client, ClientOptions
 
 # ── Logging ──────────────────────────────────────────────────
+
+# O console do Windows usa cp1252 e nao imprime as setas e acentos do log: cada linha
+# vira um traceback de UnicodeEncodeError e o log fica ilegivel. Forcar UTF-8 resolve.
+for _fluxo in (sys.stdout, sys.stderr):
+    try:
+        _fluxo.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 logging.basicConfig(
     level=logging.INFO,
@@ -485,50 +493,79 @@ def inserir_precos(
 
 # ── Progresso e resumo (so no modo MANUAL / execucao local) ───────────────
 #
-# Um run local leva horas, e pode ser interrompido por abort de envenenamento, pela
-# janela fechada ou pelo PC desligar. O arquivo de progresso guarda os ids ja tentados
-# no dia, entao basta rodar de novo que ele continua de onde parou, sem repetir nada.
-# Vira o dia, o arquivo perde a validade sozinho. No Actions isso nao roda: la o
-# loteamento (GRUPO_INICIO/GRUPO_FIM) ja faz esse papel.
+# A fonte tolera ~25 produtos por sessao e depois passa a envenenar, INDEPENDENTE do
+# ritmo: com 30s entre produtos deu 27, com 180s deu 23 (medido em 04 e 05/08). Logo o
+# limite e de VOLUME acumulado, nao de velocidade — espacar mais nao compra cobertura.
+# Mas o contador DECAI: apos ~40 min de silencio a fonte voltou a responder de verdade.
+#
+# Dai o desenho local: trabalha em BLOCOS, descansa entre eles, e ao ser envenenado
+# recua e tenta de novo depois em vez de desistir. Isso e recuo diante de um sinal de
+# "ja bastou", nao disfarce: mesmo IP, mesmo User-Agent, nada escondido.
+#
+# O progresso guarda a ULTIMA TENTATIVA de cada produto e a ordem de coleta e do mais
+# desatualizado para o mais recente. Assim cada sessao continua de onde a anterior
+# parou, o catalogo inteiro e coberto ao longo de varias sessoes e depois recomeca
+# sozinho — sem reset por data, que faria repetir eternamente os primeiros produtos.
+# Nada disso vale no Actions: la o loteamento (GRUPO_INICIO/GRUPO_FIM) faz esse papel.
 
 FONTE_LABEL = "PE"
 DIR_LOGS = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs"
 )
 
+# Quantos produtos por bloco antes de descansar, e quanto dura o descanso.
+BLOCO        = int(os.environ.get("BLOCO", "20"))
+DESCANSO_MIN = int(os.environ.get("DESCANSO_MIN", "60"))
+# Quantos envenenamentos seguidos antes de desistir da sessao.
+MAX_ENVENENAMENTOS = int(os.environ.get("MAX_ENVENENAMENTOS", "3"))
+
 
 def _hoje() -> str:
     return datetime.now(TZ).date().isoformat()
 
 
-def carregar_progresso() -> set[int]:
-    """Ids de produtos ja tentados hoje (inclusive os que vieram vazios)."""
+def _arquivo_progresso() -> str:
+    return os.path.join(DIR_LOGS, f"progresso-{FONTE_LABEL}.json")
+
+
+def carregar_progresso() -> dict[str, str]:
+    """{produto_id: timestamp da ultima tentativa}. Sem reset por data."""
     if MODO_CRON:
-        return set()
+        return {}
     try:
-        with open(os.path.join(DIR_LOGS, f"progresso-{FONTE_LABEL}.json"), encoding="utf-8") as f:
+        with open(_arquivo_progresso(), encoding="utf-8") as f:
             dados = json.load(f)
     except (OSError, ValueError):
-        return set()
-    if dados.get("data") != _hoje():
-        return set()
-    return set(dados.get("concluidos") or [])
+        return {}
+    return dados.get("tentativas") or {}
 
 
-def salvar_progresso(concluidos: set[int]) -> None:
+def salvar_progresso(tentativas: dict[str, str]) -> None:
     if MODO_CRON:
         return
     try:
         os.makedirs(DIR_LOGS, exist_ok=True)
-        alvo = os.path.join(DIR_LOGS, f"progresso-{FONTE_LABEL}.json")
+        alvo = _arquivo_progresso()
         # grava em temporario e troca: se faltar energia no meio, o arquivo bom sobrevive
         temp = alvo + ".tmp"
         with open(temp, "w", encoding="utf-8") as f:
-            json.dump({"data": _hoje(), "fonte": FONTE_LABEL,
-                       "concluidos": sorted(concluidos)}, f)
+            json.dump({"fonte": FONTE_LABEL, "atualizado_em": datetime.now(TZ).isoformat(),
+                       "tentativas": tentativas}, f)
         os.replace(temp, alvo)
     except OSError as exc:
         log.warning("Nao consegui gravar o progresso: %s", exc)
+
+
+def ordenar_por_desatualizacao(produtos: list[dict], tentativas: dict[str, str]) -> list[dict]:
+    """Mais desatualizado primeiro; nunca tentado vem antes de tudo."""
+    return sorted(produtos, key=lambda p: tentativas.get(str(p["id"]), ""))
+
+
+def descansar(motivo: str) -> None:
+    log.info("=== Descanso de %d min — %s ===", DESCANSO_MIN, motivo)
+    log.info("    Retomando por volta de %s",
+             (datetime.now(TZ) + timedelta(minutes=DESCANSO_MIN)).strftime("%H:%M"))
+    time.sleep(DESCANSO_MIN * 60)
 
 
 def escrever_resumo(linhas: list[str]) -> None:
@@ -576,22 +613,15 @@ def main() -> None:
         atualizar_cron_config(sb, "sucesso", 0)
         sys.exit(0)
 
-    # Retomada automatica: pula o que ja foi tentado hoje.
-    concluidos = carregar_progresso()
-    total_do_dia = len(produtos)
-    if concluidos:
-        produtos = [p for p in produtos if p["id"] not in concluidos]
-        log.info("Retomando: %d de %d produtos ja feitos hoje — faltam %d",
-                 len(concluidos), total_do_dia, len(produtos))
-        if not produtos:
-            log.info("Tudo ja coletado hoje. Nada a fazer.")
-            escrever_resumo([
-                "=" * 62,
-                f"RESUMO — {FONTE_LABEL} — {_hoje()}",
-                "Nada a fazer: todos os produtos ja foram coletados hoje.",
-                "=" * 62,
-            ])
-            sys.exit(0)
+    # Coleta do mais desatualizado para o mais recente, para o catalogo rodar inteiro
+    # ao longo das sessoes em vez de repetir sempre os primeiros.
+    tentativas = carregar_progresso()
+    total_catalogo = len(produtos)
+    if not MODO_CRON:
+        produtos = ordenar_por_desatualizacao(produtos, tentativas)
+        nunca = sum(1 for p in produtos if str(p["id"]) not in tentativas)
+        log.info("Ordem por desatualizacao | %d produtos, %d nunca coletados", total_catalogo, nunca)
+        log.info("Blocos de %d produtos, descanso de %d min entre eles", BLOCO, DESCANSO_MIN)
 
     session     = requests.Session()
     coleta_id   = abrir_coleta(sb)
@@ -604,57 +634,79 @@ def main() -> None:
     com_result  = 0
     processados = 0
     lojas_novas = 0
+    blocos      = 0
+    n_envenen   = 0           # quantas vezes a fonte envenenou nesta sessao
 
-    try:
-        for indice, produto in enumerate(produtos):
-            produto_id = produto["id"]
-            termo      = produto["busca"]
-            nome       = produto["nome"]
+    i = 0
+    no_bloco = 0
+    seguidas = 0              # envenenamentos consecutivos sem nenhum produto no meio
 
-            log.info("Buscando [%d/%d] | id=%d nome='%s' termo='%s'",
-                     indice + 1, len(produtos), produto_id, nome, termo)
+    while i < len(produtos):
+        produto    = produtos[i]
+        produto_id = produto["id"]
+        nome       = produto["nome"]
 
-            try:
-                registros = buscar_precos_pr(session, produto)
+        log.info("Buscando [%d/%d] | id=%d nome='%s' termo='%s'",
+                 i + 1, len(produtos), produto_id, nome, produto["busca"])
 
-                if registros:
-                    antes_lojas = len(existentes)
-                    existentes = registrar_estabelecimentos_novos(sb, registros, existentes)
-                    lojas_novas += len(existentes) - antes_lojas
+        try:
+            registros = buscar_precos_pr(session, produto)
 
-                inseridos = inserir_precos(sb, coleta_id, produto_id, registros)
-                total_geral += inseridos
-                log.info("  → %d encontrados | %d inseridos", len(registros), inseridos)
+            if registros:
+                antes_lojas = len(existentes)
+                existentes = registrar_estabelecimentos_novos(sb, registros, existentes)
+                lojas_novas += len(existentes) - antes_lojas
 
-                if registros:
-                    com_result += 1
-                else:
-                    sem_result.append(nome)
+            inseridos = inserir_precos(sb, coleta_id, produto_id, registros)
+            total_geral += inseridos
+            log.info("  → %d encontrados | %d inseridos", len(registros), inseridos)
 
-                # So marca como feito o que realmente foi consultado sem envenenamento.
-                processados += 1
-                concluidos.add(produto_id)
-                salvar_progresso(concluidos)
+            if registros:
+                com_result += 1
+            else:
+                sem_result.append(nome)
 
-            # Antes do handler genérico: envenenamento não é erro de um produto,
-            # é a fonte inteira comprometida — não adianta seguir para o próximo.
-            except RespostaEnvenenada:
-                raise
-            except Exception as exc:
-                msg = f"produto_id={produto_id} nome={nome}: {exc}"
-                log.error("ERRO | %s", msg)
-                erros.append(msg)
+            processados += 1
+            tentativas[str(produto_id)] = datetime.now(TZ).isoformat()
+            salvar_progresso(tentativas)
+            i += 1
+            no_bloco += 1
+            seguidas = 0
 
-            time.sleep(SLEEP_REQUESTS)
+        except RespostaEnvenenada as exc:
+            n_envenen += 1
+            seguidas  += 1
+            log.warning("Fonte envenenou (%s) — %d vez(es) nesta sessao", exc, n_envenen)
 
-    except RespostaEnvenenada as exc:
-        envenenado = str(exc)
-        log.error("=== ABORTADO — API devolveu dados sintéticos | %s ===", envenenado)
-        log.error("    Os %d registros ja gravados sao reais e foram mantidos.", total_geral)
-        if not MODO_CRON:
-            log.error("    Rode de novo depois: o scraper continua de onde parou.")
-        log.error("    Ver docs/scraping-precos.md §10.1.")
-        erros.append(f"resposta envenenada: {envenenado}")
+            # No Actions e bloqueio de faixa, permanente: nao adianta esperar.
+            # Local e quota temporaria, entao recua e tenta o mesmo produto depois.
+            if MODO_CRON or seguidas >= MAX_ENVENENAMENTOS:
+                envenenado = str(exc)
+                log.error("=== ENCERRANDO — %s ===",
+                          "modo CRON" if MODO_CRON
+                          else f"{seguidas} envenenamentos seguidos, a quota nao se recuperou")
+                log.error("    Os %d registros ja gravados sao reais e foram mantidos.", total_geral)
+                erros.append(f"resposta envenenada: {exc}")
+                break
+
+            descansar(f"quota atingida no produto '{nome}'")
+            no_bloco = 0
+            continue          # nao avanca: refaz este produto apos o descanso
+
+        except Exception as exc:
+            msg = f"produto_id={produto_id} nome={nome}: {exc}"
+            log.error("ERRO | %s", msg)
+            erros.append(msg)
+            i += 1
+            no_bloco += 1
+
+        # Fim de bloco: descansa antes de seguir, para nao esbarrar na quota.
+        if not MODO_CRON and no_bloco >= BLOCO and i < len(produtos):
+            blocos += 1
+            descansar(f"bloco {blocos} concluido ({no_bloco} produtos)")
+            no_bloco = 0
+
+        time.sleep(SLEEP_REQUESTS)
 
     fechar_coleta(sb, coleta_id, total_geral, erros)
 
@@ -665,32 +717,37 @@ def main() -> None:
 
     # ── Resumo ───────────────────────────────────────────────────────────
     fim = datetime.now(TZ)
-    faltam = total_do_dia - len(concluidos)
+    dur = int((fim - inicio_run).total_seconds() // 60)
     resumo = [
         "=" * 62,
-        f"RESUMO — Insumos PE (Menor Preco PR)",
-        f"Inicio {inicio_run:%d/%m %H:%M}   Fim {fim:%d/%m %H:%M}   "
-        f"({(fim - inicio_run).seconds // 60} min)",
-        f"Modo {'CRON' if MODO_CRON else 'MANUAL'} | pausa {SLEEP_REQUESTS}s | coleta id={coleta_id}",
+        "RESUMO — Insumos PE (Menor Preco PR)",
+        f"Inicio {inicio_run:%d/%m %H:%M}   Fim {fim:%d/%m %H:%M}   ({dur} min)",
+        f"Modo {'CRON' if MODO_CRON else 'MANUAL'} | pausa {SLEEP_REQUESTS}s | "
+        f"bloco {BLOCO} | descanso {DESCANSO_MIN}min | coleta id={coleta_id}",
         "-" * 62,
         f"Status          : {status_final}",
         f"Linhas gravadas : {total_geral}",
         f"Produtos nesta sessao : {processados}  (com preco: {com_result} | vazios: {len(sem_result)})",
+        f"Blocos concluidos     : {blocos}",
+        f"Envenenamentos        : {n_envenen}"
+        + ("  <- a quota se recuperou apos o descanso" if n_envenen and not envenenado else ""),
         f"Lojas novas     : {lojas_novas}",
     ]
     if envenenado:
         resumo += [
             "-" * 62,
-            f"ABORTADO — resposta envenenada ({envenenado})",
+            f"ENCERRADO por envenenamento persistente ({envenenado})",
             "O que ja foi gravado e real. Rode de novo depois: continua de onde parou.",
         ]
     if erros:
         resumo += ["-" * 62, f"ERROS ({len(erros)}):"] + [f"  - {e[:110]}" for e in erros[:10]]
     if not MODO_CRON:
+        nunca_ainda = sum(1 for p in produtos if str(p["id"]) not in tentativas)
         resumo += [
             "-" * 62,
-            f"PROGRESSO DO DIA: {len(concluidos)} de {total_do_dia} produtos concluidos"
-            + (f" — faltam {faltam}" if faltam > 0 else " — COMPLETO"),
+            f"CATALOGO: {total_catalogo - nunca_ainda} de {total_catalogo} produtos ja coletados"
+            + (f" — {nunca_ainda} nunca vistos" if nunca_ainda else " — COBERTURA COMPLETA"),
+            "A proxima sessao continua pelos mais desatualizados.",
         ]
     if sem_result:
         resumo += ["-" * 62, f"SEM RESULTADO ({len(sem_result)}):"] + [f"  {n}" for n in sem_result]

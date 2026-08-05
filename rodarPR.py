@@ -11,10 +11,18 @@ with open('.env.local') as f:
             k, v = line.split('=', 1)
             os.environ[k] = v
 
-# Local nao tem o timeout de 30 min do Actions, entao da para ir bem mais devagar.
-# 180s = um produto a cada 3 min. Sao 160 produtos, entao a varredura completa leva
-# ~8h — mas nao precisa caber numa sessao: o scraper guarda o progresso do dia e
-# continua de onde parou na proxima vez que voce rodar.
-os.environ.setdefault('SLEEP_REQUESTS', '180')
+# A fonte tolera ~25 produtos por sessao e depois envenena, independente do ritmo -
+# o limite e de volume, nao de velocidade. Mas o contador decai com o tempo, entao a
+# estrategia e trabalhar em blocos e descansar entre eles.
+#
+#   20 produtos x 60s = 20 min de trabalho
+#   + 60 min de descanso  = 80 min por ciclo, ~20 produtos por ciclo
+#
+# Nao precisa caber numa sessao: o progresso fica salvo e a proxima execucao continua
+# pelos produtos mais desatualizados. Se a fonte envenenar antes do fim do bloco, ele
+# descansa e tenta de novo; so desiste apos MAX_ENVENENAMENTOS seguidos.
+os.environ.setdefault('SLEEP_REQUESTS', '60')
+os.environ.setdefault('BLOCO', '20')
+os.environ.setdefault('DESCANSO_MIN', '60')
 
 subprocess.run([sys.executable, 'scraper/scraperPE.py'])
