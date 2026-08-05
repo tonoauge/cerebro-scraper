@@ -11,4 +11,10 @@ with open('.env.local') as f:
             k, v = line.split('=', 1)
             os.environ[k] = v
 
+# Local nao tem o timeout de 30 min do Actions, entao da para ir bem mais devagar.
+# 180s = um produto a cada 3 min. Sao 160 produtos, entao a varredura completa leva
+# ~8h — mas nao precisa caber numa sessao: o scraper guarda o progresso do dia e
+# continua de onde parou na proxima vez que voce rodar.
+os.environ.setdefault('SLEEP_REQUESTS', '180')
+
 subprocess.run([sys.executable, 'scraper/scraperPE.py'])

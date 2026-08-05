@@ -3,6 +3,9 @@
 .env.*
 *.env
 
+# Logs e progresso das execucoes locais — nao vao para o repo
+logs/
+
 # Python
 __pycache__/
 *.py[cod]
