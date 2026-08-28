@@ -83,7 +83,18 @@ else:
 # ── Configurações ─────────────────────────────────────────────
 
 TZ             = ZoneInfo("America/Recife")
-LOCAL          = "7n74tuuvek0"   # código da região Petrolina/Juazeiro
+# Região Petrolina/Juazeiro. Era "7n74tuuvek0" (11 dígitos) até 28/08/2026.
+#
+# 11 dígitos descrevem uma célula de 0,15 m x 0,15 m — quinze centímetros, idêntica em
+# toda requisição há meses. Nenhum GPS de celular produz isso. Truncar para 8 dígitos dá
+# uma célula de 19 m x 38 m, que é a faixa de erro real de um aparelho, e **move o ponto
+# só 4,2 m** — irrelevante para um raio de 20 km, com as lojas a 0,66-4,49 km daqui.
+#
+# Truncar mantém o prefixo, então é o mesmo lugar, com menos precisão declarada. A API é
+# canônica em 11 dígitos: no dado limpo ela devolve o geohash da loja com 11 caracteres
+# independente do que enviamos (frutas manda 9 e recebe 11). No dado envenenado ela ecoa
+# exatamente o que mandamos — por isso detectar_envenenamento() continua funcionando.
+LOCAL          = "7n74tuuv"      # 8 dígitos — ver docs/scraping-precos.md §10.3
 RAIO           = 20              # km
 DATA_DIAS      = 3               # dias retroativos
 ORDEM          = 2               # 2 = mais recente primeiro
