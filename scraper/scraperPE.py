@@ -517,7 +517,25 @@ DIR_LOGS = os.path.join(
 BLOCO        = int(os.environ.get("BLOCO", "20"))
 DESCANSO_MIN = int(os.environ.get("DESCANSO_MIN", "60"))
 # Quantos envenenamentos seguidos antes de desistir da sessao.
-MAX_ENVENENAMENTOS = int(os.environ.get("MAX_ENVENENAMENTOS", "3"))
+#
+# Era 3 ate 28/08/2026. O contador `seguidas` zera a cada produto que passa, entao 3
+# sempre significou tres falhas CONSECUTIVAS sem recuperar nada. Medido nas 10 sessoes
+# locais de 05 a 27/08: as tentativas apos a parede recuperaram ZERO produtos, ao custo
+# de dois descansos de 60 min por sessao — ~20 h de maquina ligada por nada. Com 1 a
+# medicao e identica e a sessao encerra na parede.
+MAX_ENVENENAMENTOS = int(os.environ.get("MAX_ENVENENAMENTOS", "1"))
+
+# Sonda de pre-voo: uma requisicao antes de comecar, so no modo MANUAL.
+#
+# Em 28/08/2026, 10,8 h depois da parede da sessao anterior, cinco geohashes diferentes
+# — inclusive ineditos, e um a 17 km — voltaram TODOS envenenados. Ou seja: enquanto o
+# bloqueio esta ativo ele cobre qualquer ponto, e uma sessao que comeca dentro dessa
+# janela esta perdida antes da primeira requisicao. A sonda evita gastar a noite a toa.
+#
+# SONDA_TERMO precisa ser um termo qualquer do catalogo; o que ele devolve nao importa,
+# so se vem real ou fabricado. IGNORAR_SONDA=1 roda mesmo com o IP bloqueado.
+SONDA_TERMO   = os.environ.get("SONDA_TERMO", "Score")
+IGNORAR_SONDA = os.environ.get("IGNORAR_SONDA", "") == "1"
 
 
 def _hoje() -> str:
@@ -566,6 +584,32 @@ def descansar(motivo: str) -> None:
     log.info("    Retomando por volta de %s",
              (datetime.now(TZ) + timedelta(minutes=DESCANSO_MIN)).strftime("%H:%M"))
     time.sleep(DESCANSO_MIN * 60)
+
+
+def sondar_bloqueio(session: requests.Session) -> tuple[bool, str]:
+    """Uma requisicao para saber se o IP esta liberado. Devolve (liberado, detalhe).
+
+    Detalhe importante do gerador de dado falso: ele SEMPRE devolve itens. Logo uma
+    resposta vazia nao e envenenamento — e so termo sem nota recente, e nesse caso a
+    sonda nao acusa bloqueio. Erro de rede tambem nao bloqueia: melhor deixar o run
+    seguir e falhar por conta propria do que impedir uma coleta boa por causa da sonda.
+    """
+    params = {"termo": SONDA_TERMO, "local": LOCAL, "raio": RAIO,
+              "data": DATA_DIAS, "ordem": ORDEM}
+    try:
+        r = session.get(f"{BASE_URL}/produtos", headers=HEADERS, params=params, timeout=20)
+        r.raise_for_status()
+        itens = (r.json() or {}).get("produtos") or []
+    except Exception as exc:
+        return True, f"inconclusiva ({exc}) — seguindo assim mesmo"
+
+    if not itens:
+        return True, f"limpa — termo '{SONDA_TERMO}' sem notas recentes, mas sem eco"
+    try:
+        detectar_envenenamento(itens, LOCAL)
+    except RespostaEnvenenada as exc:
+        return False, str(exc)
+    return True, f"limpa — {len(itens)} itens reais para '{SONDA_TERMO}'"
 
 
 def escrever_resumo(linhas: list[str]) -> None:
@@ -624,6 +668,28 @@ def main() -> None:
         log.info("Blocos de %d produtos, descanso de %d min entre eles", BLOCO, DESCANSO_MIN)
 
     session     = requests.Session()
+
+    sonda_detalhe = "nao executada (modo CRON)"
+    if not MODO_CRON:
+        liberado, sonda_detalhe = sondar_bloqueio(session)
+        log.info("Sonda de pre-voo: %s", sonda_detalhe)
+        if not liberado and IGNORAR_SONDA:
+            log.warning("IGNORAR_SONDA=1 — seguindo apesar do bloqueio")
+        elif not liberado:
+            escrever_resumo([
+                "=" * 62,
+                "SONDA — Insumos PE (Menor Preco PR)",
+                f"{datetime.now(TZ):%d/%m %H:%M}   IP BLOQUEADO — sessao nao iniciada",
+                "-" * 62,
+                f"  {sonda_detalhe}",
+                "  Nenhuma requisicao de coleta foi feita; nada gravado, nada perdido.",
+                "  O bloqueio expira sozinho — 7,9 h bastaram em 24/08, mas em 28/08",
+                "  ainda estava ativo com 10,8 h. Tente mais tarde.",
+                "  IGNORAR_SONDA=1 forca a execucao mesmo bloqueado.",
+                "=" * 62,
+            ])
+            sys.exit(0)
+
     coleta_id   = abrir_coleta(sb)
     total_geral = 0
     erros       = []
@@ -724,6 +790,10 @@ def main() -> None:
         f"Inicio {inicio_run:%d/%m %H:%M}   Fim {fim:%d/%m %H:%M}   ({dur} min)",
         f"Modo {'CRON' if MODO_CRON else 'MANUAL'} | pausa {SLEEP_REQUESTS}s | "
         f"bloco {BLOCO} | descanso {DESCANSO_MIN}min | coleta id={coleta_id}",
+        # LOCAL entra no resumo porque os testes de geohash trocam esse valor: sem ele
+        # nao da para saber, meses depois, qual ponto rendeu o que.
+        f"Ponto {LOCAL} ({len(LOCAL)} digitos) | raio {RAIO}km | janela {DATA_DIAS}d",
+        f"Sonda de pre-voo: {sonda_detalhe}",
         "-" * 62,
         f"Status          : {status_final}",
         f"Linhas gravadas : {total_geral}",

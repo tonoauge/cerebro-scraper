@@ -11,18 +11,21 @@ with open('.env.local') as f:
             k, v = line.split('=', 1)
             os.environ[k] = v
 
-# A fonte tolera ~25 produtos por sessao e depois envenena, independente do ritmo -
-# o limite e de volume, nao de velocidade. Mas o contador decai com o tempo, entao a
-# estrategia e trabalhar em blocos e descansar entre eles.
+# Quanto a fonte tolera por sessao NAO e fixo. Medido em 10 sessoes locais entre 05 e
+# 27/08/2026, em requisicoes ate o envenenamento:
 #
-#   20 produtos x 60s = 20 min de trabalho
-#   + 60 min de descanso  = 80 min por ciclo, ~20 produtos por ciclo
+#   40, 40, 78, 80, 80, 104, 112, 200, 200, 224   (mediana 92)
 #
-# Nao precisa caber numa sessao: o progresso fica salvo e a proxima execucao continua
-# pelos produtos mais desatualizados. Se a fonte envenenar antes do fim do bloco, ele
-# descansa e tenta de novo; so desiste apos MAX_ENVENENAMENTOS seguidos.
+# Nao ha teto estavel, e o ritmo nao explica: 30s entre produtos deu 27, 180s deu 23.
+# O progresso fica salvo, entao nao precisa caber numa sessao — a proxima continua
+# pelos produtos mais desatualizados e o catalogo inteiro e coberto ao longo de varias.
+#
+#   20 produtos x 60s = 20 min de trabalho + 60 min de descanso = ~20 produtos por ciclo
 os.environ.setdefault('SLEEP_REQUESTS', '60')
 os.environ.setdefault('BLOCO', '20')
 os.environ.setdefault('DESCANSO_MIN', '60')
+# Encerrar na primeira parede. As tentativas seguintes nunca recuperaram nada nas 10
+# sessoes medidas e custavam ~2 h cada. Ver scraper/scraperPE.py.
+os.environ.setdefault('MAX_ENVENENAMENTOS', '1')
 
 subprocess.run([sys.executable, 'scraper/scraperPE.py'])
