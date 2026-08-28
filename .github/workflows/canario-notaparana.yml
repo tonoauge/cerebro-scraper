@@ -11,10 +11,18 @@
 #
 # Uma requisição não gera carga. Não grava nada no banco.
 # Ver docs/scraping-precos.md §10 no repo cerebro-agro.
+#
+# Desde 28/08/2026 roda sozinho, 1x por semana. Os 10 lotes PE que rodavam pelo
+# Actions foram desligados (sql/parar-actions-pe.sql no cerebro-agro) porque
+# voltavam sempre envenenados, 0 linhas. Este canário é a única coisa que ainda
+# sai de IP de datacenter, e existe só para avisar se o bloqueio for levantado.
+# Segunda 11:00 UTC = 08:00 BRT — horário de tráfego normal do app.
 
 name: Canário Nota Paraná
 
 on:
+  schedule:
+    - cron: '0 11 * * 1'
   workflow_dispatch:
 
 jobs:
