@@ -115,8 +115,23 @@ HEADERS = {
     "User-Agent":      "Dalvik/2.1.0 (Linux; U; Android 16; 2412DPC0AG Build/BP2A.250605.031.A3)",
 }
 
-# ── Cache local de categorias PR (evita chamadas repetidas no mesmo run) ──
-_cache_categorias: dict[str, int | None] = {}
+# ── Cache de categorias PR ────────────────────────────────────────────────
+# Ate 02/09/2026 este cache vivia so em memoria. Aqui ele acerta pouco: a chave inclui o
+# ponto, e cada produto e consultado nos 3 de LOCAIS, entao sao 16 x 3 = 48 descobertas
+# por sessao — metade das 96 requisicoes do run.
+#
+# Persistindo em disco, da segunda sessao em diante frutas cai de 6 para 3 requisicoes por
+# produto. Mesmo raciocinio do scraperPE.py: a fonte corta por volume de requisicoes, entao
+# cada chamada economizada e uma chance a menos de tropecar.
+#
+# logs/ esta no .gitignore — nada vai para o repo publico. Apagar o arquivo volta ao
+# comportamento antigo.
+_cache_categorias: dict[tuple, int | None] = {}   # da sessao (inclui negativos)
+_categorias_disco: dict[str, dict] = {}           # o que veio e o que vai para o arquivo
+_cat_do_cache = 0
+_cat_consultadas = 0
+
+CATEGORIAS_TTL_DIAS = 90
 
 
 # ── Detecção de resposta envenenada ───────────────────────────────────────
@@ -178,10 +193,21 @@ def calcular_preco_por_kg(preco: float, qtd: float | None, unidade: str) -> floa
 # ── API Menor Preço PR ────────────────────────────────────────
 
 def buscar_categoria_pr(session: requests.Session, termo: str, local: str) -> int | None:
+    """ID de categoria da API do PR para (ponto, termo), do disco quando já conhecido."""
+    global _cat_do_cache, _cat_consultadas
+
     chave = (local, termo)
     if chave in _cache_categorias:
         return _cache_categorias[chave]
 
+    chave_disco = f"{local}|{termo}"
+    reg = _categorias_disco.get(chave_disco)
+    if reg:
+        _cache_categorias[chave] = reg["id"]
+        _cat_do_cache += 1
+        return reg["id"]
+
+    _cat_consultadas += 1
     url = f"{BASE_URL}/categorias"
     params = {"termo": termo, "local": local, "raio": RAIO, "data": DATA_DIAS}
     try:
@@ -191,9 +217,15 @@ def buscar_categoria_pr(session: requests.Session, termo: str, local: str) -> in
         categorias = dados.get("categorias") or dados.get("resultado") or []
         if categorias and isinstance(categorias[0], dict):
             cat_id = categorias[0].get("id") or categorias[0].get("codigo")
-            _cache_categorias[chave] = int(cat_id) if cat_id else None
+            valor = int(cat_id) if cat_id else None
+            _cache_categorias[chave] = valor
+            # Só o positivo vai para o disco: um "não achei" pode ter vindo de resposta
+            # envenenada ou erro de rede, e gravado envenenaria o cache para sempre.
+            if valor is not None:
+                _categorias_disco[chave_disco] = {"id": valor,
+                                                  "visto_em": datetime.now(TZ).isoformat()}
             log.info("  Categoria PR descoberta | termo='%s' categoria_id=%s", termo, cat_id)
-            return _cache_categorias[chave]
+            return valor
     except Exception as exc:
         log.warning("  Erro ao buscar categoria PR | termo='%s' | %s", termo, exc)
 
@@ -551,6 +583,46 @@ def descansar(motivo: str) -> None:
     time.sleep(DESCANSO_MIN * 60)
 
 
+def _arquivo_categorias() -> str:
+    return os.path.join(DIR_LOGS, f"categorias-{FONTE_LABEL}.json")
+
+
+def carregar_categorias() -> dict[str, dict]:
+    """{'<local>|<termo>': {'id': int, 'visto_em': iso}}, sem as entradas vencidas."""
+    if MODO_CRON:
+        return {}
+    try:
+        with open(_arquivo_categorias(), encoding="utf-8") as f:
+            dados = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    limite = datetime.now(TZ) - timedelta(days=CATEGORIAS_TTL_DIAS)
+    vivas: dict[str, dict] = {}
+    for chave, reg in (dados.get("categorias") or {}).items():
+        try:
+            if datetime.fromisoformat(reg["visto_em"]) >= limite:
+                vivas[chave] = reg
+        except (KeyError, TypeError, ValueError):
+            continue
+    return vivas
+
+
+def salvar_categorias() -> None:
+    if MODO_CRON or not _categorias_disco:
+        return
+    try:
+        os.makedirs(DIR_LOGS, exist_ok=True)
+        alvo = _arquivo_categorias()
+        temp = alvo + ".tmp"
+        with open(temp, "w", encoding="utf-8") as f:
+            json.dump({"fonte": FONTE_LABEL,
+                       "atualizado_em": datetime.now(TZ).isoformat(),
+                       "categorias": _categorias_disco}, f)
+        os.replace(temp, alvo)
+    except OSError as exc:
+        log.warning("Nao consegui gravar o cache de categorias: %s", exc)
+
+
 def escrever_resumo(linhas: list[str]) -> None:
     """Resumo curto do run, para leitura posterior sem varrer o log inteiro."""
     texto = "\n".join(linhas)
@@ -599,6 +671,9 @@ def main() -> None:
     # Coleta do mais desatualizado para o mais recente, para o catalogo rodar inteiro
     # ao longo das sessoes em vez de repetir sempre os primeiros.
     tentativas = carregar_progresso()
+    _categorias_disco.update(carregar_categorias())
+    if _categorias_disco:
+        log.info("Cache de categorias: %d pares (ponto, termo) conhecidos", len(_categorias_disco))
     total_catalogo = len(produtos)
     if not MODO_CRON:
         produtos = ordenar_por_desatualizacao(produtos, tentativas)
@@ -664,6 +739,7 @@ def main() -> None:
             processados += 1
             tentativas[str(produto_id)] = datetime.now(TZ).isoformat()
             salvar_progresso(tentativas)
+            salvar_categorias()   # junto do progresso: um abort no meio nao perde o cache
             idx += 1
             no_bloco += 1
             seguidas = 0
@@ -702,6 +778,10 @@ def main() -> None:
 
         time.sleep(SLEEP_REQUESTS)
 
+    # Gravação final: o último produto pode ter descoberto uma categoria e sido
+    # envenenado logo em seguida, sem passar pelo salvamento de dentro do laço.
+    salvar_categorias()
+
     fechar_coleta(sb, coleta_id, total_geral, erros)
 
     status_final = ("falha" if envenenado
@@ -726,6 +806,9 @@ def main() -> None:
         f"Envenenamentos        : {n_envenen}"
         + ("  <- a quota se recuperou apos o descanso" if n_envenen and not envenenado else ""),
         f"Lojas novas     : {lojas_novas}",
+        f"Categorias      : {_cat_do_cache} do cache | {_cat_consultadas} consultadas"
+        + ("  <- 3 requisicoes por produto" if _cat_consultadas == 0 and _cat_do_cache
+           else "  <- cache enchendo" if _cat_do_cache else ""),
     ]
     if envenenado:
         resumo += [
