@@ -43,6 +43,16 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+# Falhas de requisicao acumuladas na sessao. Sem isso, 429 e erro de rede viram
+# lista vazia e a coleta termina verde, indistinguivel de "a fonte nao tem nada".
+FALHAS_REQUISICAO: list[str] = []
+
+
+def registrar_falha(motivo: str) -> None:
+    FALHAS_REQUISICAO.append(motivo)
+    log.error("Falha de requisicao | %s", motivo)
+
+
 # ── Modo de execução ──────────────────────────────────────────
 
 EM_CI = os.environ.get('CI', 'false').lower() == 'true'
@@ -208,6 +218,17 @@ def filtrar_item(item: dict) -> bool:
 
 # ── API do Preço da Hora BA ───────────────────────────────────
 
+# Codigos de retorno da API do Preco da Hora
+CODIGO_OK             = 80   # tem resultado
+CODIGO_SEM_RESULTADO  = 50   # "Nenhum resultado encontrado!" — fim de paginacao legitimo
+
+
+class RespostaInvalida(RuntimeError):
+    """A API recusou a requisicao (codigo != 80 e != 50). Nao e ausencia de
+    resultado: e falha nossa ou da fonte, e precisa aparecer como erro."""
+
+
+
 def _buscar_pagina(
     session: requests.Session,
     termo: str,
@@ -246,6 +267,7 @@ def _buscar_pagina(
                     if deve_renovar:
                         return None  # sinaliza renovar sessão
                     else:
+                        registrar_falha(f"429 persistente | termo={termo} pag={pagina}")
                         return []   # CI: pula produto
                 continue
 
@@ -264,15 +286,28 @@ def _buscar_pagina(
             if tentativa < MAX_RETRIES:
                 time.sleep(SLEEP_429)
             else:
+                registrar_falha(f"HTTP error | termo={termo} pag={pagina} | {exc}")
                 return []
         except ValueError:
             log.warning("JSON inválido | pág %d | termo=%s", pagina, termo)
+            registrar_falha(f"JSON invalido | termo={termo} pag={pagina}")
             return []
     else:
+        registrar_falha(f"sem payload apos {MAX_RETRIES} tentativas | termo={termo} pag={pagina}")
         return []
 
-    if payload.get("codigo") != 80 or not payload.get("resultado"):
-        return []  # sem mais resultados nesta página
+    # A API distingue "nao achei" de "sua requisicao esta errada", e tratar os dois
+    # como lista vazia foi o que manteve cfru_precos em zero por 5 meses: com
+    # HORAS=720 ela respondia 86 ("numero de dias/horas invalido") e o scraper
+    # lia isso como fim de paginacao, fechando a coleta em verde com total=0.
+    codigo = payload.get("codigo")
+    if codigo not in (CODIGO_OK, CODIGO_SEM_RESULTADO):
+        raise RespostaInvalida(
+            f"codigo={codigo} ({payload.get('descricao')}) | termo={termo} pag={pagina}"
+        )
+
+    if codigo == CODIGO_SEM_RESULTADO or not payload.get("resultado"):
+        return []
 
     itens = payload["resultado"]
     return itens if isinstance(itens, list) else []
@@ -388,8 +423,30 @@ def abrir_coleta(sb: Client) -> int:
     return coleta_id
 
 
-def fechar_coleta(sb: Client, coleta_id: int, total: int, erros: list) -> None:
-    status = "sucesso" if not erros else ("erro_parcial" if total > 0 else "falha")
+def fechar_coleta(sb: Client, coleta_id: int, total: int, erros: list,
+                  produtos_tentados: int = 0, total_encontrados: int | None = None) -> str:
+    """Fecha a coleta e devolve o status gravado.
+
+    Consultar produtos e nao achar nada em nenhum deles nao e sucesso — e assim
+    que uma fonte morre em silencio (frutas BA passou 5 meses em zero terminando
+    verde). O gatilho e `encontrados`, nao `inseridos`: um re-run no mesmo dia
+    insere 0 por deduplicacao e continua sendo uma coleta sadia.
+    """
+    erros = list(erros)
+    vazia = (
+        not erros
+        and produtos_tentados > 0
+        and total_encontrados is not None
+        and total_encontrados == 0
+    )
+    if vazia:
+        erros.append(
+            f"coleta vazia: {produtos_tentados} produto(s) consultado(s), "
+            f"nenhum resultado da fonte"
+        )
+        status = "erro_parcial"
+    else:
+        status = "sucesso" if not erros else ("erro_parcial" if total > 0 else "falha")
     sb.table("ADSef_coletas").update({
         "finalizado_em":   datetime.now(TZ).isoformat(),
         "status":          status,
@@ -398,6 +455,7 @@ def fechar_coleta(sb: Client, coleta_id: int, total: int, erros: list) -> None:
     }).eq("id", coleta_id).execute()
     log.info("Coleta finalizada | id=%d status=%s total=%d erros=%d",
              coleta_id, status, total, len(erros))
+    return status
 
 
 def atualizar_cron_config(sb: Client, status: str, total: int) -> None:
@@ -492,6 +550,8 @@ def main() -> None:
     coleta_id   = abrir_coleta(sb)
     total_geral = 0
     erros       = []
+    encontrados = 0   # linhas que a fonte devolveu — distingue "fonte muda" de "tudo duplicado"
+    tentados    = 0
 
     for produto in produtos:
         produto_id = produto["id"]
@@ -518,6 +578,8 @@ def main() -> None:
 
                 inseridos = inserir_precos(sb, coleta_id, produto_id, registros)
                 total_geral += inseridos
+                encontrados += len(registros)
+                tentados    += 1
                 log.info("  → %d encontrados | %d inseridos", len(registros), inseridos)
 
             except Exception as exc:
@@ -527,10 +589,15 @@ def main() -> None:
 
             time.sleep(SLEEP_REQUESTS)
 
-    fechar_coleta(sb, coleta_id, total_geral, erros)
+    # Falhas de requisicao entram no status: 429 e erro de rede nao podem sair
+    # verdes so porque o produto voltou "vazio".
+    if FALHAS_REQUISICAO:
+        amostra = "; ".join(FALHAS_REQUISICAO[:5])
+        extra = "" if len(FALHAS_REQUISICAO) <= 5 else f" (+{len(FALHAS_REQUISICAO) - 5})"
+        erros.append(f"{len(FALHAS_REQUISICAO)} falha(s) de requisicao: {amostra}{extra}")
 
-    # Atualiza cron_config se aplicável
-    status_final = "sucesso" if not erros else ("erro_parcial" if total_geral > 0 else "falha")
+    status_final = fechar_coleta(sb, coleta_id, total_geral, erros,
+                                 produtos_tentados=tentados, total_encontrados=encontrados)
     atualizar_cron_config(sb, status_final, total_geral)
 
     log.info("=== Concluído | %d registros novos ===", total_geral)
