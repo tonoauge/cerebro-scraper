@@ -138,3 +138,9 @@ else:
 
 print("\n  O cache em disco ja esta no ar e funciona nos dois casos.")
 print("  Estas conclusoes so dizem se da para simplificar ainda mais.")
+
+print("\n" + "=" * 76)
+print("  O IP ESTA LIMPO AGORA — aproveite a janela.")
+print("  Rode em seguida:  rodar coleta de precos - PR.bat")
+print("  A janela dura ate a proxima parede; depois dela sao 17 a 28 h de espera.")
+print("=" * 76)
