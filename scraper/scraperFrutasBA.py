@@ -499,9 +499,14 @@ def registrar_lojas_novas(sb: Client, registros: list[dict], lojas_existentes: s
 
 # ── Execução principal ────────────────────────────────────────
 
-def _com_retry(fn, tentativas=3, espera=15, descricao=""):
+def _com_retry(fn, tentativas=3, espera=15, fator=1, descricao=""):
     """Repete fn() algumas vezes, absorvendo erros transitorios de rede
-    (timeout do site-fonte, conexao HTTP/2 do Supabase encerrada, etc.)."""
+    (timeout do site-fonte, conexao HTTP/2 do Supabase encerrada, etc.).
+
+    `fator` multiplica a espera a cada rodada. Com fator=1 (padrao) o intervalo e
+    fixo, que e o suficiente para as leituras do Supabase; o site-fonte precisa de
+    espera crescente, ver a chamada de criar_sessao em main().
+    """
     for tentativa in range(1, tentativas + 1):
         try:
             return fn()
@@ -511,6 +516,7 @@ def _com_retry(fn, tentativas=3, espera=15, descricao=""):
             log.warning("Tentativa %d/%d falhou em '%s' (%s) - aguardando %ds e repetindo",
                         tentativa, tentativas, descricao, exc, espera)
             time.sleep(espera)
+            espera *= fator
 
 
 def main() -> None:
@@ -525,7 +531,15 @@ def main() -> None:
         atualizar_cron_config(sb, "sucesso", 0)
         sys.exit(0)
 
-    session     = _com_retry(criar_sessao, descricao="criar_sessao")
+    # precodahora.ba.gov.br fica inalcancavel por um a dois minutos de vez em quando —
+    # ConnectTimeout, nao 429: a conexao nem chega a se estabelecer. Com 3 tentativas a
+    # cada 15s a gente desistia em 93s, e era isso que derrubava um lote a cada poucos
+    # dias (run #444 de 03/09 no scraper.py; run #46 de 30/08 no Frutas BA, mesma
+    # assinatura). Agora sao 4 tentativas com espera dobrando — 20s, 40s, 80s — o que da
+    # ~3,7 min de paciencia. Um lote da BA leva 17-21 min, entao ainda sobra folga
+    # confortavel contra o timeout-minutes: 30 do job.
+    session     = _com_retry(criar_sessao, tentativas=4, espera=20, fator=2,
+                             descricao="criar_sessao")
     coleta_id   = abrir_coleta(sb)
     total_geral = 0
     erros       = []
