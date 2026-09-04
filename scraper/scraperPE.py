@@ -51,6 +51,18 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+# Contador de requisicoes a fonte. A parede nao cai por produto nem por tempo: cai depois de
+# um certo numero de REQUISICOES. Ate 04/09/2026 esse numero so era reconstruido a mao,
+# garimpando o resumo (produtos + categorias + sonda) — e sem ele nao da para comparar um
+# ciclo com outro, que e o unico jeito de testar se andar no padrao do app adia a marcacao.
+REQUISICOES = 0
+
+
+def _contar() -> None:
+    global REQUISICOES
+    REQUISICOES += 1
+
+
 # Falhas de requisicao acumuladas na sessao. Sem isso, 429 e erro de rede viram
 # lista vazia e a coleta termina verde, indistinguivel de "a fonte nao tem nada".
 FALHAS_REQUISICAO: list[str] = []
@@ -261,6 +273,7 @@ def buscar_categoria_pr(session: requests.Session, termo: str) -> int | None:
     url = f"{BASE_URL}/categorias"
     params = {"termo": termo, "local": LOCAL, "raio": RAIO, "data": DATA_DIAS}
     try:
+        _contar()
         r = session.get(url, headers=HEADERS, params=params, timeout=20)
         r.raise_for_status()
         dados = r.json()
@@ -307,6 +320,7 @@ def buscar_precos_pr(
 
     for tentativa in range(1, MAX_RETRIES + 1):
         try:
+            _contar()
             r = session.get(url, headers=HEADERS, params=params, timeout=20)
 
             if r.status_code == 429:
@@ -756,6 +770,7 @@ def sondar_bloqueio(session: requests.Session) -> tuple[bool, str]:
     params = {"termo": SONDA_TERMO, "local": LOCAL, "raio": RAIO,
               "data": DATA_DIAS, "ordem": ORDEM}
     try:
+        _contar()
         r = session.get(f"{BASE_URL}/produtos", headers=HEADERS, params=params, timeout=20)
         r.raise_for_status()
         itens = (r.json() or {}).get("produtos") or []
@@ -981,6 +996,8 @@ def main() -> None:
         f"Categorias      : {_cat_do_cache} do cache | {_cat_consultadas} consultadas"
         + ("  <- 1 requisicao por produto" if _cat_consultadas == 0 and _cat_do_cache
            else "  <- cache enchendo" if _cat_do_cache else ""),
+        f"Requisicoes a fonte   : {REQUISICOES}"
+        + "   <- e nesta conta que a parede cai",
     ]
     if envenenado:
         resumo += [
