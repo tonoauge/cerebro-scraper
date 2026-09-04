@@ -139,7 +139,7 @@ HEADERS = {
 #
 # Agora persiste em logs/categorias-<FONTE>.json (logs/ esta no .gitignore, entao nada vai
 # para o repo publico). Apagar o arquivo restaura o comportamento antigo.
-_cache_categorias: dict[str, int | None] = {}   # da sessao (inclui negativos)
+_cache_categorias: dict[str, int | None] = {}   # chaveado pelo termo (inclui negativos)
 _categorias_disco: dict[str, dict] = {}         # o que veio e o que vai para o arquivo
 _cat_do_cache = 0                               # contadores, para o resumo
 _cat_consultadas = 0
@@ -211,19 +211,20 @@ def buscar_categoria_pr(session: requests.Session, termo: str) -> int | None:
     """Descobre o ID numérico de categoria da API do PR para o termo.
 
     Consulta o cache em disco antes de gastar uma requisição — ver o comentário em
-    `_cache_categorias`. A chave inclui o `local` porque a chamada de `/categorias`
-    também o envia; se um dia ficar provado que o ID independe do ponto, dá para
-    chavear só pelo termo e o cache rende mais.
+    `_cache_categorias`. O `local` ainda vai na requisição (a API o exige), mas saiu
+    da chave: medido em 03/09/2026 que o ID independe do ponto.
     """
     global _cat_do_cache, _cat_consultadas
 
-    chave = f"{LOCAL}|{termo}"
-    if chave in _cache_categorias:
-        return _cache_categorias[chave]
+    # Medido em 03/09/2026: o ID nao depende do ponto — 'Amistar Top' devolve 18 tanto
+    # em 7n74tuuv quanto em 7n75qzfef. Chavear so pelo termo faz o cache valer tambem
+    # para o scraper de frutas, que compartilha o catalogo.
+    if termo in _cache_categorias:
+        return _cache_categorias[termo]
 
-    reg = _categorias_disco.get(chave)
+    reg = _categorias_disco.get(termo)
     if reg:
-        _cache_categorias[chave] = reg["id"]
+        _cache_categorias[termo] = reg["id"]
         _cat_do_cache += 1
         return reg["id"]
 
@@ -238,19 +239,19 @@ def buscar_categoria_pr(session: requests.Session, termo: str) -> int | None:
         if categorias and isinstance(categorias[0], dict):
             cat_id = categorias[0].get("id") or categorias[0].get("codigo")
             valor = int(cat_id) if cat_id else None
-            _cache_categorias[chave] = valor
+            _cache_categorias[termo] = valor
             # Só o resultado POSITIVO vai para o disco. Um "não achei" pode ter vindo de
             # resposta envenenada ou de erro de rede; gravado, envenenaria o cache para
             # sempre — e o custo de redescobrir na próxima sessão é uma requisição.
             if valor is not None:
-                _categorias_disco[chave] = {"id": valor,
+                _categorias_disco[termo] = {"id": valor,
                                             "visto_em": datetime.now(TZ).isoformat()}
             log.info("  Categoria PR descoberta | termo='%s' categoria_id=%s", termo, cat_id)
             return valor
     except Exception as exc:
         log.warning("  Erro ao buscar categoria PR | termo='%s' | %s", termo, exc)
 
-    _cache_categorias[chave] = None
+    _cache_categorias[termo] = None
     return None
 
 
@@ -676,7 +677,11 @@ def _arquivo_categorias() -> str:
 
 
 def carregar_categorias() -> dict[str, dict]:
-    """{'<local>|<termo>': {'id': int, 'visto_em': iso}}, sem as entradas vencidas."""
+    """{'<termo>': {'id': int, 'visto_em': iso}}, sem as entradas vencidas.
+
+    Aceita o formato antigo '<local>|<termo>' e o converte, para nao descartar um
+    cache ja aquecido quando a chave mudou.
+    """
     if MODO_CRON:
         return {}
     try:
@@ -689,7 +694,7 @@ def carregar_categorias() -> dict[str, dict]:
     for chave, reg in (dados.get("categorias") or {}).items():
         try:
             if datetime.fromisoformat(reg["visto_em"]) >= limite:
-                vivas[chave] = reg
+                vivas[chave.split("|")[-1]] = reg
         except (KeyError, TypeError, ValueError):
             continue          # entrada corrompida: descarta, redescobre depois
     return vivas

@@ -136,12 +136,24 @@ HEADERS = {
 #
 # logs/ esta no .gitignore — nada vai para o repo publico. Apagar o arquivo volta ao
 # comportamento antigo.
-_cache_categorias: dict[tuple, int | None] = {}   # da sessao (inclui negativos)
+# Medido em 03/09/2026: o ID de categoria NAO depende do ponto — 'Uva' devolve 55 e
+# 'Amistar Top' devolve 18 nos tres LOCAIS e ate em Curitiba. Por isso a chave e so o
+# termo, e o cache passa a acertar entre pontos (e entre as duas fontes PE, que
+# compartilham cfru_produtos). Chaves antigas no formato '<local>|<termo>' continuam
+# sendo lidas — carregar_categorias() as normaliza.
+_cache_categorias: dict[str, int | None] = {}     # da sessao (inclui negativos)
 _categorias_disco: dict[str, dict] = {}           # o que veio e o que vai para o arquivo
 _cat_do_cache = 0
 _cat_consultadas = 0
 
 CATEGORIAS_TTL_DIAS = 90
+
+# A API ordena as categorias por quantidade, e `categorias[0]` erra justamente no termo
+# mais amplo: 'Uva' devolve Bebidas(215) antes de Hortifruti(123). Medido em 03/09 com
+# categoria=55 vieram 50 itens e ZERO com NCM 0806 (so Fanta e suco, tudo descartado
+# depois pela allowlist de NCM); com categoria=4 vieram 47 itens, 46 deles NCM 08061000.
+# Os outros 15 termos do catalogo ja caem em Hortifruti ou nao tem categoria.
+CATEGORIAS_PREFERIDAS = ("hortifruti",)
 
 
 # ── Detecção de resposta envenenada ───────────────────────────────────────
@@ -202,18 +214,32 @@ def calcular_preco_por_kg(preco: float, qtd: float | None, unidade: str) -> floa
 
 # ── API Menor Preço PR ────────────────────────────────────────
 
+def escolher_categoria(categorias: list[dict]) -> dict | None:
+    """A preferida quando estiver na lista; senao a primeira, como antes."""
+    validas = [c for c in categorias if isinstance(c, dict)]
+    if not validas:
+        return None
+    for pref in CATEGORIAS_PREFERIDAS:
+        for c in validas:
+            if pref in str(c.get("desc") or "").strip().lower():
+                return c
+    return validas[0]
+
+
 def buscar_categoria_pr(session: requests.Session, termo: str, local: str) -> int | None:
-    """ID de categoria da API do PR para (ponto, termo), do disco quando já conhecido."""
+    """ID de categoria da API do PR para o termo, do disco quando já conhecido.
+
+    O `local` ainda vai na requisição (a API o exige), mas não entra na chave do
+    cache — ver o comentário em CATEGORIAS_PREFERIDAS.
+    """
     global _cat_do_cache, _cat_consultadas
 
-    chave = (local, termo)
-    if chave in _cache_categorias:
-        return _cache_categorias[chave]
+    if termo in _cache_categorias:
+        return _cache_categorias[termo]
 
-    chave_disco = f"{local}|{termo}"
-    reg = _categorias_disco.get(chave_disco)
+    reg = _categorias_disco.get(termo)
     if reg:
-        _cache_categorias[chave] = reg["id"]
+        _cache_categorias[termo] = reg["id"]
         _cat_do_cache += 1
         return reg["id"]
 
@@ -225,21 +251,23 @@ def buscar_categoria_pr(session: requests.Session, termo: str, local: str) -> in
         r.raise_for_status()
         dados = r.json()
         categorias = dados.get("categorias") or dados.get("resultado") or []
-        if categorias and isinstance(categorias[0], dict):
-            cat_id = categorias[0].get("id") or categorias[0].get("codigo")
+        escolhida = escolher_categoria(categorias)
+        if escolhida:
+            cat_id = escolhida.get("id") or escolhida.get("codigo")
             valor = int(cat_id) if cat_id else None
-            _cache_categorias[chave] = valor
+            _cache_categorias[termo] = valor
             # Só o positivo vai para o disco: um "não achei" pode ter vindo de resposta
             # envenenada ou erro de rede, e gravado envenenaria o cache para sempre.
             if valor is not None:
-                _categorias_disco[chave_disco] = {"id": valor,
-                                                  "visto_em": datetime.now(TZ).isoformat()}
-            log.info("  Categoria PR descoberta | termo='%s' categoria_id=%s", termo, cat_id)
+                _categorias_disco[termo] = {"id": valor,
+                                            "visto_em": datetime.now(TZ).isoformat()}
+            log.info("  Categoria PR escolhida | termo='%s' categoria_id=%s desc='%s' (de %d opcao(oes))",
+                     termo, cat_id, escolhida.get("desc"), len(categorias))
             return valor
     except Exception as exc:
         log.warning("  Erro ao buscar categoria PR | termo='%s' | %s", termo, exc)
 
-    _cache_categorias[chave] = None
+    _cache_categorias[termo] = None
     return None
 
 
@@ -622,7 +650,11 @@ def _arquivo_categorias() -> str:
 
 
 def carregar_categorias() -> dict[str, dict]:
-    """{'<local>|<termo>': {'id': int, 'visto_em': iso}}, sem as entradas vencidas."""
+    """{'<termo>': {'id': int, 'visto_em': iso}}, sem as entradas vencidas.
+
+    Aceita o formato antigo '<local>|<termo>' e o converte, para nao descartar um
+    cache ja aquecido quando a chave mudou.
+    """
     if MODO_CRON:
         return {}
     try:
@@ -635,7 +667,7 @@ def carregar_categorias() -> dict[str, dict]:
     for chave, reg in (dados.get("categorias") or {}).items():
         try:
             if datetime.fromisoformat(reg["visto_em"]) >= limite:
-                vivas[chave] = reg
+                vivas[chave.split("|")[-1]] = reg
         except (KeyError, TypeError, ValueError):
             continue
     return vivas
