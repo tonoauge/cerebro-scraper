@@ -116,16 +116,26 @@ TZ             = ZoneInfo("America/Recife")
 # canônica em 11 dígitos: no dado limpo ela devolve o geohash da loja com 11 caracteres
 # independente do que enviamos (frutas manda 9 e recebe 11). No dado envenenado ela ecoa
 # exatamente o que mandamos — por isso detectar_envenenamento() continua funcionando.
-# 04/09/2026: de volta ao formato canonico da fonte, e desta vez com um ponto que ELA
-# emitiu. Medido em 1.000 geohashes de estabelecimento em respostas limpas: 100% com 11
-# caracteres e 100% terminando em '0'. O truncamento para 8 digitos (28/08) era um teste
-# que ja foi registrado como SEM EFEITO, entao nao ha o que preservar nele.
+# 04/09/2026 — o `local` e o CENTRO DO RAIO de captacao, a posicao de quem consulta.
+# Nao e identificador de loja: usar o geohash de um estabelecimento significaria "estou
+# dentro do Atacadao", que nenhum cliente manda de forma repetida — e ainda fazia os itens
+# daquela loja ecoarem o ponto da consulta por direito, confundindo o detector.
 #
-# Este ponto e o do ATACADAO S.A. em Petrolina, colhido da resposta limpa de 04/09. A
-# secao 10.3 mostra que formato canonico sozinho NAO evita o envenenamento (7n74tuuvek0,
-# nosso, foi envenenado 47/47); o que nunca foi testado e um ponto de ORIGEM da fonte.
-# `teste-geohash.py` decide isso na proxima janela bloqueada.
-LOCAL          = "7n74tsjskd0"   # 11 dígitos — ver docs/scraping-precos.md §10.3 e §10.6
+# O que ficou medido e util e o COMPRIMENTO: /mapa/search, o localizador que a propria SPA
+# usa para montar a consulta, devolve pontos de 9 caracteres sem excecao — 2.252 em
+# Curitiba, 5.512 em Londrina, 2.345 em Maringa. Nove e o que um cliente legitimo envia.
+# (Os 11 caracteres terminados em '0' sao o que a fonte DEVOLVE por estabelecimento; foram
+# confundidos com o padrao de envio numa primeira versao deste comentario.)
+#
+# Entao: o centro geografico de sempre em Petrolina — o mesmo `7n74tuuvek0` usado desde o
+# inicio — truncado para 9. Mesma regiao, mesma serie historica, comprimento de cliente.
+#
+# A correlacao que sustenta a escolha: frutas PE manda 9 e e a unica coleta local que volta
+# limpa com regularidade; insumos mandava 11, depois 8, e envenena sempre. Nao e prova — a
+# secao 10.3 mostra que, com o bloqueio JA ativo, ponto de 9 tambem e envenenado. A hipotese
+# em teste e que andar no padrao do cliente ADIA a marcacao, e o instrumento dessa medida e
+# a contagem de REQUISICOES ate a parede, agora no resumo.
+LOCAL          = "7n74tuuve"    # 9 dígitos — ver docs/scraping-precos.md §10.3 e §10.6
 RAIO           = 20              # km
 DATA_DIAS      = 3               # dias retroativos
 ORDEM          = 2               # 2 = mais recente primeiro

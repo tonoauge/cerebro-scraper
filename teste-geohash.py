@@ -30,9 +30,13 @@ _sessao = requests.Session()
 TERMO = sys.argv[1] if len(sys.argv) > 1 else "Uva"
 
 # Colhidos em 04/09/2026 da resposta limpa: geohash do estabelecimento, 11 chars, final 0.
+# Duas perguntas, uma por eixo. COMPRIMENTO: 9 e o que a SPA envia, 11 e o que a fonte
+# devolve por loja. ORIGEM: ponto geografico nosso contra geohash de um estabelecimento.
+# O centro de captacao legitimo e um ponto geografico — loja entra aqui so como controle.
 PONTOS_DA_FONTE = [
-    ("loja SENDAS (ponto da fonte)",   "7n74whw2kn0"),
-    ("loja ATACADAO (ponto da fonte)", "7n74tsjskd0"),
+    ("centro de sempre, 9 chars",     "7n74tuuve"),
+    ("ponto de frutas, 9 chars",      "7n754bpeh"),
+    ("loja ATACADAO, 11 (controle)",  "7n74tsjskd0"),
 ]
 # Fixos de proposito: se seguissem sp.LOCAL, a comparacao se perderia quando ele mudasse.
 PONTOS_NOSSOS = [
