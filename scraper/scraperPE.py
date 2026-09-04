@@ -104,7 +104,16 @@ TZ             = ZoneInfo("America/Recife")
 # canônica em 11 dígitos: no dado limpo ela devolve o geohash da loja com 11 caracteres
 # independente do que enviamos (frutas manda 9 e recebe 11). No dado envenenado ela ecoa
 # exatamente o que mandamos — por isso detectar_envenenamento() continua funcionando.
-LOCAL          = "7n74tuuv"      # 8 dígitos — ver docs/scraping-precos.md §10.3
+# 04/09/2026: de volta ao formato canonico da fonte, e desta vez com um ponto que ELA
+# emitiu. Medido em 1.000 geohashes de estabelecimento em respostas limpas: 100% com 11
+# caracteres e 100% terminando em '0'. O truncamento para 8 digitos (28/08) era um teste
+# que ja foi registrado como SEM EFEITO, entao nao ha o que preservar nele.
+#
+# Este ponto e o do ATACADAO S.A. em Petrolina, colhido da resposta limpa de 04/09. A
+# secao 10.3 mostra que formato canonico sozinho NAO evita o envenenamento (7n74tuuvek0,
+# nosso, foi envenenado 47/47); o que nunca foi testado e um ponto de ORIGEM da fonte.
+# `teste-geohash.py` decide isso na proxima janela bloqueada.
+LOCAL          = "7n74tsjskd0"   # 11 dígitos — ver docs/scraping-precos.md §10.3 e §10.6
 RAIO           = 20              # km
 DATA_DIAS      = 3               # dias retroativos
 ORDEM          = 2               # 2 = mais recente primeiro
@@ -162,17 +171,37 @@ class RespostaEnvenenada(Exception):
 
 
 def detectar_envenenamento(itens: list[dict], local: str) -> None:
-    """Levanta RespostaEnvenenada se a maioria dos itens ecoar o geohash consultado.
+    """Levanta RespostaEnvenenada quando a resposta e fabricada.
 
-    O limiar de metade evita que uma coincidência isolada derrube um run legítimo.
+    Dois sinais independentes, e o NCM decide:
+
+    - **NCM sintetico** — no dado fabricado ele tem 9 digitos e comeca em `320`; no
+      real tem 8. Medido em 04/09/2026 sobre 1.000 linhas de cada lado em
+      `cfru_precos_pe`: 100% de um jeito e 100% do outro. Nao depende do geohash.
+    - **Geohash ecoado** — a API devolve o ponto que ENVIAMOS em vez do ponto da loja.
+
+    O eco sozinho deixou de bastar: desde que `LOCAL` passou a ser um ponto emitido
+    pela fonte (o geohash de uma loja real), os itens daquela loja ecoam o valor da
+    consulta por direito. Num produto vendido so ali, o eco passaria de 50% e abortaria
+    uma sessao limpa. Por isso o eco so condena acompanhado do NCM sintetico.
     """
     if not itens:
         return
-    ecoados = sum(1 for it in itens if (it.get("local") or "") == local)
-    if ecoados / len(itens) >= 0.5:
+
+    total     = len(itens)
+    ecoados   = sum(1 for it in itens if (it.get("local") or "") == local)
+    sinteticos = sum(1 for it in itens if len(str(it.get("ncm") or "")) == 9)
+
+    if sinteticos / total >= 0.5:
         raise RespostaEnvenenada(
-            f"local='{local}' ecoado em {ecoados}/{len(itens)} itens"
+            f"NCM sintetico em {sinteticos}/{total} itens"
+            f" (local='{local}' ecoado em {ecoados}/{total})"
         )
+
+    if ecoados / total >= 0.5:
+        # Eco alto sem NCM sintetico: e a nossa propria loja de referencia aparecendo.
+        log.info("  Eco alto sem NCM sintetico (%d/%d) — consulta centrada em loja real,"
+                 " dado tratado como limpo", ecoados, total)
 
 # ── Extração de quantidade da embalagem ──────────────────────
 
