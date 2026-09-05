@@ -17,5 +17,11 @@ with open('.env.local') as f:
 os.environ.setdefault('SLEEP_REQUESTS', '60')
 os.environ.setdefault('BLOCO', '20')
 os.environ.setdefault('DESCANSO_MIN', '60')
+# Encerrar na primeira parede, como insumos ja faz desde 05/08. Frutas usava o padrao 3 do
+# scraper, o que custa ate 3 h de descanso antes de desistir — e agora se sabe que esperar
+# nao adianta: medido em 03 e 04/09, o bloqueio so cai na virada do dia UTC (21:00 em
+# Recife), nunca por tempo de espera. Rodar de novo depois das 21:00 rende; insistir na
+# mesma sessao so gasta madrugada. O progresso fica salvo, entao nada se perde.
+os.environ.setdefault('MAX_ENVENENAMENTOS', '1')
 
 subprocess.run([sys.executable, 'scraper/scraperFrutasPE.py'])
