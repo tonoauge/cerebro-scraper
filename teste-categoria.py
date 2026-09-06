@@ -24,6 +24,8 @@ import importlib.util
 
 import requests
 
+import registro
+
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 RAIZ = os.path.dirname(os.path.abspath(__file__))
@@ -40,6 +42,9 @@ sp = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(sp)
 
 TERMO = sys.argv[1] if len(sys.argv) > 1 else "Score"
+
+_arquivo_log = registro.tee("teste-categoria")   # a resposta custou requisicao: fica gravada
+
 PONTO_ATUAL = sp.LOCAL          # 8 digitos
 PONTO_ANTIGO = "7n74tuuvek0"    # 11 digitos, o que usamos ate 28/08
 PAUSA = 20

@@ -22,12 +22,15 @@ import sys, time
 import requests
 
 sys.path.insert(0, "scraper")
+import registro
 import scraperPE as sp   # reaproveita HEADERS, RAIO, DATA_DIAS e o mesmo cliente HTTP
 
 # requests, e nao urllib: os HEADERS do scraper pedem gzip e so o requests descomprime.
 _sessao = requests.Session()
 
 TERMO = sys.argv[1] if len(sys.argv) > 1 else "Uva"
+
+_arquivo_log = registro.tee("teste-geohash")   # a resposta custou requisicao: fica gravada
 
 # Colhidos em 04/09/2026 da resposta limpa: geohash do estabelecimento, 11 chars, final 0.
 # Duas perguntas, uma por eixo. COMPRIMENTO: 9 e o que a SPA envia, 11 e o que a fonte

@@ -24,9 +24,12 @@ import time
 import requests
 
 sys.path.insert(0, "scraper")
+import registro
 import scraperFrutasPE as sp   # LOCAIS, RAIO, DATA_DIAS, HEADERS, detector
 
 TERMO = sys.argv[1] if len(sys.argv) > 1 else "Uva"
+
+_arquivo_log = registro.tee("teste-offset")   # a resposta custou requisicao: fica gravada
 PONTO = sp.LOCAIS[0]
 _sessao = requests.Session()
 
