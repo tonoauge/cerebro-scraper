@@ -175,7 +175,8 @@ _categorias_disco: dict[str, dict] = {}         # o que veio e o que vai para o 
 _cat_do_cache = 0                               # contadores, para o resumo
 _cat_consultadas = 0
 
-CATEGORIAS_TTL_DIAS = 90   # um ID obsoleto nao sobrevive para sempre
+CATEGORIAS_TTL_DIAS = 90
+NEGATIVO_TTL_DIAS = 7    # "sem categoria" reexpira rapido: pode ter sido resposta ruim   # um ID obsoleto nao sobrevive para sempre
 
 
 # ── Detecção de resposta envenenada ───────────────────────────────────────
@@ -292,11 +293,15 @@ def buscar_categoria_pr(session: requests.Session, termo: str) -> int | None:
             cat_id = categorias[0].get("id") or categorias[0].get("codigo")
             valor = int(cat_id) if cat_id else None
             _cache_categorias[termo] = valor
-            # Só o resultado POSITIVO vai para o disco. Um "não achei" pode ter vindo de
-            # resposta envenenada ou de erro de rede; gravado, envenenaria o cache para
-            # sempre — e o custo de redescobrir na próxima sessão é uma requisição.
+            # Desde 06/09 o negativo tambem e gravado, com prazo curto (NEGATIVO_TTL_DIAS).
+            # A prudencia antiga de nao grava-lo custava uma requisicao por termo sem
+            # categoria, por sessao — caro quando o orcamento cai para a casa das dezenas.
+            # Um positivo conhecido nunca e sobrescrito por negativo.
             if valor is not None:
                 _categorias_disco[termo] = {"id": valor,
+                                            "visto_em": datetime.now(TZ).isoformat()}
+            elif termo not in _categorias_disco:
+                _categorias_disco[termo] = {"id": None,
                                             "visto_em": datetime.now(TZ).isoformat()}
             log.info("  Categoria PR descoberta | termo='%s' categoria_id=%s", termo, cat_id)
             return valor
@@ -742,10 +747,13 @@ def carregar_categorias() -> dict[str, dict]:
             dados = json.load(f)
     except (OSError, ValueError):
         return {}
-    limite = datetime.now(TZ) - timedelta(days=CATEGORIAS_TTL_DIAS)
+    agora = datetime.now(TZ)
+    limite_pos = agora - timedelta(days=CATEGORIAS_TTL_DIAS)
+    limite_neg = agora - timedelta(days=NEGATIVO_TTL_DIAS)
     vivas: dict[str, dict] = {}
     for chave, reg in (dados.get("categorias") or {}).items():
         try:
+            limite = limite_pos if reg.get("id") is not None else limite_neg
             if datetime.fromisoformat(reg["visto_em"]) >= limite:
                 vivas[chave.split("|")[-1]] = reg
         except (KeyError, TypeError, ValueError):

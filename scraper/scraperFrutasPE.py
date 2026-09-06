@@ -159,6 +159,7 @@ _cat_do_cache = 0
 _cat_consultadas = 0
 
 CATEGORIAS_TTL_DIAS = 90
+NEGATIVO_TTL_DIAS = 7    # "sem categoria" reexpira rapido: pode ter sido resposta ruim
 
 # A API ordena as categorias por quantidade, e `categorias[0]` erra justamente no termo
 # mais amplo: 'Uva' devolve Bebidas(215) antes de Hortifruti(123). Medido em 03/09 com
@@ -289,10 +290,23 @@ def buscar_categoria_pr(session: requests.Session, termo: str, local: str) -> in
             cat_id = escolhida.get("id") or escolhida.get("codigo")
             valor = int(cat_id) if cat_id else None
             _cache_categorias[termo] = valor
-            # Só o positivo vai para o disco: um "não achei" pode ter vindo de resposta
-            # envenenada ou erro de rede, e gravado envenenaria o cache para sempre.
+            # Positivo vale 90 dias; "nao achei" agora tambem e gravado, com prazo curto.
+            #
+            # Ate 06/09 o negativo nao ia para o disco, com a justificativa de que poderia
+            # ter vindo de resposta envenenada. O custo dessa prudencia ficou visivel
+            # quando o orcamento encolheu: na sessao daquele dia, 4 das 14 requisicoes
+            # foram redescobrir que 'Uva Branca', 'Uva BRS' e 'uva cx' nao tem categoria —
+            # fato ja conhecido desde 03/09. Metade dos 16 termos cai nesse caso.
+            #
+            # O risco de gravar errado e pequeno e limitado: sem categoria a consulta so
+            # deixa de ser filtrada, e volta a ser tentada em NEGATIVO_TTL_DIAS. Um positivo
+            # ja conhecido nunca e sobrescrito por negativo, entao o filtro do 'Uva' — que
+            # e o unico que muda resultado de verdade — nao se perde.
             if valor is not None:
                 _categorias_disco[termo] = {"id": valor,
+                                            "visto_em": datetime.now(TZ).isoformat()}
+            elif termo not in _categorias_disco:
+                _categorias_disco[termo] = {"id": None,
                                             "visto_em": datetime.now(TZ).isoformat()}
             log.info("  Categoria PR escolhida | termo='%s' categoria_id=%s desc='%s' (de %d opcao(oes))",
                      termo, cat_id, escolhida.get("desc"), len(categorias))
@@ -696,10 +710,13 @@ def carregar_categorias() -> dict[str, dict]:
             dados = json.load(f)
     except (OSError, ValueError):
         return {}
-    limite = datetime.now(TZ) - timedelta(days=CATEGORIAS_TTL_DIAS)
+    agora = datetime.now(TZ)
+    limite_pos = agora - timedelta(days=CATEGORIAS_TTL_DIAS)
+    limite_neg = agora - timedelta(days=NEGATIVO_TTL_DIAS)
     vivas: dict[str, dict] = {}
     for chave, reg in (dados.get("categorias") or {}).items():
         try:
+            limite = limite_pos if reg.get("id") is not None else limite_neg
             if datetime.fromisoformat(reg["visto_em"]) >= limite:
                 vivas[chave.split("|")[-1]] = reg
         except (KeyError, TypeError, ValueError):
