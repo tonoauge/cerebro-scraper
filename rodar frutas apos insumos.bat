@@ -1,4 +1,4 @@
 @echo off
 cd /d "%~dp0"
-python encadear.py insumos
+python encadear.py frutas
 pause
