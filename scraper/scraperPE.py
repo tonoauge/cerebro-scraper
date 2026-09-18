@@ -259,6 +259,17 @@ def calcular_preco_por_kg(preco: float, qtd: float | None, unidade: str) -> floa
 
 # ── API Menor Preço PR ────────────────────────────────────────
 
+def _lembrar_negativo(termo: str) -> None:
+    """Grava "este termo nao tem categoria", sem nunca sobrescrever um positivo.
+
+    So deve ser chamado quando a RESPOSTA CHEGOU e veio sem categoria. Erro de rede
+    nao entra aqui: ali nao se aprendeu nada sobre o termo.
+    """
+    if _categorias_disco.get(termo, {}).get("id") is None:
+        _categorias_disco[termo] = {"id": None,
+                                    "visto_em": datetime.now(TZ).isoformat()}
+
+
 def buscar_categoria_pr(session: requests.Session, termo: str) -> int | None:
     """Descobre o ID numérico de categoria da API do PR para o termo.
 
@@ -300,11 +311,17 @@ def buscar_categoria_pr(session: requests.Session, termo: str) -> int | None:
             if valor is not None:
                 _categorias_disco[termo] = {"id": valor,
                                             "visto_em": datetime.now(TZ).isoformat()}
-            elif termo not in _categorias_disco:
-                _categorias_disco[termo] = {"id": None,
-                                            "visto_em": datetime.now(TZ).isoformat()}
+            else:
+                _lembrar_negativo(termo)
             log.info("  Categoria PR descoberta | termo='%s' categoria_id=%s", termo, cat_id)
             return valor
+
+        # Resposta chegou e nao trouxe categoria alguma: negativo legitimo. Era este
+        # o caminho comum (termos como 'Uva Branca'), e ele ficou de fora da correcao
+        # de 06/09 — que so tratava o caso raro de vir categoria sem id. Resultado:
+        # dois ciclos depois, o cache tinha 58 positivos e ZERO negativos, e cada
+        # sessao seguia repagando a descoberta desses termos.
+        _lembrar_negativo(termo)
     except Exception as exc:
         log.warning("  Erro ao buscar categoria PR | termo='%s' | %s", termo, exc)
 
