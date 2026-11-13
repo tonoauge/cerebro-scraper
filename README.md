@@ -33,3 +33,15 @@ ambiente.
 
 A referência de funcionamento (fluxo, lotes, agenda, incidentes) vive no repositório
 privado do app em `docs/scraping-precos.md`.
+
+## Manutenção — os 60 dias do Actions
+
+O GitHub **desliga os workflows agendados** quando o repositório passa **60 dias sem
+nenhum commit**. Como aqui só se mexe quando um scraper quebra, é normal ficar meses
+parado com a coleta rodando sozinha — e aí o agendamento cai por inatividade, sem
+nada ter dado errado no código.
+
+Para evitar: **mover o repositório** (qualquer commit na `main`) antes de fechar os 60
+dias desde o último. Nenhum workflow tem gatilho `push`, então o commit em si não
+dispara coleta. Se o agendamento já tiver sido desligado, um commit **não** o religa —
+é preciso reativar cada workflow na aba Actions (ou `gh workflow enable <id>`).
