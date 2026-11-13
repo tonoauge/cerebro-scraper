@@ -1,0 +1,50 @@
+name: Keepalive do agendamento
+
+# O GitHub desliga os workflows agendados deste repo depois de 60 dias sem
+# nenhum commit (ver README). Como aqui so se mexe quando um scraper quebra,
+# e normal ficar meses parado com a coleta rodando sozinha. Este workflow
+# olha de semana em semana quantos dias se passaram e so move o repo quando
+# passa do limite — repo ativo nao ganha commit de bot nenhum.
+
+on:
+  schedule:
+    - cron: '20 5 * * 1'   # toda segunda, 05h20 UTC (02h20 BRT)
+  workflow_dispatch:
+    inputs:
+      forcar:
+        description: 'Commitar mesmo que o repo esteja ativo (para testar o caminho de push)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: keepalive
+
+jobs:
+  mover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Mover o repo se estiver perto dos 60 dias
+        env:
+          FORCAR: ${{ inputs.forcar }}
+          LIMITE_DIAS: '45'
+        run: |
+          set -euo pipefail
+          dias=$(( ( $(date -u +%s) - $(git log -1 --format=%ct) ) / 86400 ))
+          echo "Ultimo commit ha ${dias} dia(s). Limite: ${LIMITE_DIAS}. Forcar: ${FORCAR:-false}."
+          if [ "${dias}" -lt "${LIMITE_DIAS}" ] && [ "${FORCAR:-false}" != "true" ]; then
+            echo "Repositorio ativo o suficiente — nada a commitar."
+            exit 0
+          fi
+          date -u +'%Y-%m-%d' > .github/keepalive
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/keepalive
+          git commit -m "chore(keepalive): move o repo apos ${dias} dias sem commit"
+          git push
+          echo "Commit empurrado — a contagem dos 60 dias reiniciou."

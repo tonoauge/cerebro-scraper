@@ -41,7 +41,13 @@ nenhum commit**. Como aqui só se mexe quando um scraper quebra, é normal ficar
 parado com a coleta rodando sozinha — e aí o agendamento cai por inatividade, sem
 nada ter dado errado no código.
 
-Para evitar: **mover o repositório** (qualquer commit na `main`) antes de fechar os 60
-dias desde o último. Nenhum workflow tem gatilho `push`, então o commit em si não
-dispara coleta. Se o agendamento já tiver sido desligado, um commit **não** o religa —
-é preciso reativar cada workflow na aba Actions (ou `gh workflow enable <id>`).
+Isso é automático desde 12/11/2026: [`keepalive.yml`](.github/workflows/keepalive.yml)
+roda toda segunda, mede quantos dias se passaram desde o último commit e **só** move o
+repositório (carimbo em `.github/keepalive`) quando passa de **45 dias**. Enquanto
+houver trabalho real no repo, ele não commita nada. Nenhum workflow tem gatilho `push`,
+então esse commit não dispara coleta.
+
+Se o agendamento já tiver sido desligado, um commit **não** o religa — é preciso
+reativar cada workflow na aba Actions, ou `gh workflow enable <id>`. Vale lembrar que o
+próprio keepalive é agendado: se ele for desligado junto, religar os workflows é o passo
+que volta a proteger o resto.
